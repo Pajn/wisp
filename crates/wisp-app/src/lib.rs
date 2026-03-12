@@ -1,8 +1,13 @@
+use std::path::PathBuf;
+
 use wisp_config::{ResolvedConfig, UiMode};
 use wisp_core::{
-    Candidate, CandidateId, PreviewContent, PreviewKey, PreviewRequest, ResolvedAction,
-    deduplicate_candidates, preview_request_for_candidate, resolve_action, sort_candidates,
+    Candidate, CandidateId, DirectoryMetadata, PreviewContent, PreviewKey, PreviewRequest,
+    ResolvedAction, SessionMetadata, deduplicate_candidates, normalize_display_path,
+    preview_request_for_candidate, resolve_action, sort_candidates,
 };
+use wisp_tmux::TmuxSnapshot;
+use wisp_zoxide::DirectoryEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -85,6 +90,27 @@ pub enum AppCommand {
     ExecuteAction(ResolvedAction),
     RefreshSources,
     Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateBuildOptions {
+    pub home: Option<PathBuf>,
+    pub include_missing_directories: bool,
+}
+
+impl Default for CandidateBuildOptions {
+    fn default() -> Self {
+        Self {
+            home: std::env::var("HOME").ok().map(PathBuf::from),
+            include_missing_directories: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateSources {
+    pub tmux: TmuxSnapshot,
+    pub zoxide: Vec<DirectoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,14 +274,67 @@ impl AppState {
     }
 }
 
+#[must_use]
+pub fn rebuild_candidates(
+    sources: &CandidateSources,
+    options: &CandidateBuildOptions,
+) -> Vec<Candidate> {
+    let mut candidates = tmux_session_candidates(&sources.tmux);
+    candidates.extend(zoxide_candidates(&sources.zoxide, options));
+
+    let mut candidates = deduplicate_candidates(candidates);
+    sort_candidates(&mut candidates);
+    candidates
+}
+
+fn tmux_session_candidates(snapshot: &TmuxSnapshot) -> Vec<Candidate> {
+    snapshot
+        .sessions
+        .iter()
+        .map(|session| {
+            Candidate::session(SessionMetadata {
+                session_name: session.name.clone(),
+                attached: session.attached,
+                current: session.current,
+                window_count: session.windows,
+                last_activity: session.last_activity,
+            })
+        })
+        .collect()
+}
+
+fn zoxide_candidates(
+    entries: &[DirectoryEntry],
+    options: &CandidateBuildOptions,
+) -> Vec<Candidate> {
+    entries
+        .iter()
+        .filter(|entry| options.include_missing_directories || entry.exists)
+        .map(|entry| {
+            Candidate::directory(DirectoryMetadata {
+                full_path: entry.path.clone(),
+                display_path: normalize_display_path(&entry.path, options.home.as_deref()),
+                zoxide_score: entry.score,
+                git_root_hint: None,
+                exists: entry.exists,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use wisp_config::ResolvedConfig;
     use wisp_core::{Candidate, DirectoryMetadata, PreviewContent, PreviewKey, SessionMetadata};
+    use wisp_tmux::{TmuxCapabilities, TmuxContext, TmuxSession, TmuxSnapshot, TmuxVersion};
+    use wisp_zoxide::DirectoryEntry;
 
-    use crate::{AppCommand, AppMode, AppState, StatusLevel, UserIntent};
+    use crate::{
+        AppCommand, AppMode, AppState, CandidateBuildOptions, CandidateSources, StatusLevel,
+        UserIntent, rebuild_candidates,
+    };
 
     #[test]
     fn bootstraps_from_config() {
@@ -380,5 +459,87 @@ mod tests {
         assert_eq!(state.status.level, StatusLevel::Warning);
         assert_eq!(state.status.message, "preview unavailable");
         assert!(!state.preview.loading);
+    }
+
+    #[test]
+    fn rebuilds_unified_candidates_from_tmux_and_zoxide() {
+        let existing = std::env::temp_dir().join("wisp-app-candidate-existing");
+        std::fs::create_dir_all(&existing).expect("existing directory");
+        let sources = CandidateSources {
+            tmux: TmuxSnapshot {
+                context: TmuxContext::default(),
+                capabilities: TmuxCapabilities {
+                    version: TmuxVersion {
+                        major: 3,
+                        minor: 6,
+                        patch: None,
+                    },
+                    supports_popup: true,
+                },
+                sessions: vec![TmuxSession {
+                    name: "alpha".to_string(),
+                    attached: true,
+                    windows: 2,
+                    current: true,
+                    last_activity: Some(5),
+                }],
+                windows: Vec::new(),
+            },
+            zoxide: vec![DirectoryEntry {
+                path: existing.clone(),
+                score: Some(10.0),
+                exists: true,
+            }],
+        };
+
+        let candidates = rebuild_candidates(
+            &sources,
+            &CandidateBuildOptions {
+                home: None,
+                include_missing_directories: false,
+            },
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.primary_text == "alpha")
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.primary_text == existing.display().to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(existing);
+    }
+
+    #[test]
+    fn omits_missing_zoxide_directories_by_default() {
+        let sources = CandidateSources {
+            tmux: TmuxSnapshot {
+                context: TmuxContext::default(),
+                capabilities: TmuxCapabilities {
+                    version: TmuxVersion {
+                        major: 3,
+                        minor: 6,
+                        patch: None,
+                    },
+                    supports_popup: true,
+                },
+                sessions: Vec::new(),
+                windows: Vec::new(),
+            },
+            zoxide: vec![DirectoryEntry {
+                path: PathBuf::from("/path/that/does/not/exist"),
+                score: Some(99.0),
+                exists: false,
+            }],
+        };
+
+        let candidates = rebuild_candidates(&sources, &CandidateBuildOptions::default());
+
+        assert!(candidates.is_empty());
     }
 }

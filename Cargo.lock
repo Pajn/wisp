@@ -190,6 +190,8 @@ version = "0.1.0"
 dependencies = [
  "wisp-config",
  "wisp-core",
+ "wisp-tmux",
+ "wisp-zoxide",
 ]
 
 [[package]]
@@ -232,3 +234,6 @@ version = "0.1.0"
 [[package]]
 name = "wisp-zoxide"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]

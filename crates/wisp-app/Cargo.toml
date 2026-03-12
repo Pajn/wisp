@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 wisp-config = { path = "../wisp-config" }
 wisp-core = { path = "../wisp-core" }
+wisp-tmux = { path = "../wisp-tmux" }
+wisp-zoxide = { path = "../wisp-zoxide" }
 
 [lints]
 workspace = true
