@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+wisp-app = { path = "../wisp-app" }
+wisp-config = { path = "../wisp-config" }
+wisp-core = { path = "../wisp-core" }
+wisp-fuzzy = { path = "../wisp-fuzzy" }
+wisp-preview = { path = "../wisp-preview" }
+wisp-status = { path = "../wisp-status" }
+wisp-tmux = { path = "../wisp-tmux" }
+wisp-ui = { path = "../wisp-ui" }
+wisp-zoxide = { path = "../wisp-zoxide" }
 
 [lints]
 workspace = true

@@ -746,6 +746,19 @@ dependencies = [
 [[package]]
 name = "wisp-bin"
 version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "wisp-app",
+ "wisp-config",
+ "wisp-core",
+ "wisp-fuzzy",
+ "wisp-preview",
+ "wisp-status",
+ "wisp-tmux",
+ "wisp-ui",
+ "wisp-zoxide",
+]
 
 [[package]]
 name = "wisp-config"
@@ -768,6 +781,10 @@ version = "0.1.0"
 [[package]]
 name = "wisp-preview"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "wisp-core",
+]
 
 [[package]]
 name = "wisp-status"
