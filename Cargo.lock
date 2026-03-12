@@ -221,6 +221,9 @@ version = "0.1.0"
 [[package]]
 name = "wisp-tmux"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "wisp-ui"
