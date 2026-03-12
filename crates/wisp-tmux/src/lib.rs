@@ -21,6 +21,9 @@ pub trait TmuxClient {
         directory: &Path,
     ) -> Result<(), TmuxError>;
     fn open_popup(&self, command: &PopupCommand, options: &PopupOptions) -> Result<(), TmuxError>;
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError>;
+    fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError>;
+    fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +74,12 @@ pub struct PopupCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PopupSpec {
+    pub command: PopupCommand,
+    pub options: PopupOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PopupOptions {
     pub width: PopupDimension,
     pub height: PopupDimension,
@@ -91,6 +100,62 @@ impl Default for PopupOptions {
 pub enum PopupDimension {
     Percent(u8),
     Cells(u16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarPaneSpec {
+    pub target: Option<String>,
+    pub side: SidebarSide,
+    pub width: u16,
+    pub command: PopupCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventStrategy {
+    PollingFallback,
+    ControlMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TmuxCommand {
+    EnsureSession {
+        session_name: String,
+        directory: PathBuf,
+    },
+    SwitchOrAttachSession {
+        session_name: String,
+    },
+    CreateOrSwitchSession {
+        session_name: String,
+        directory: PathBuf,
+    },
+    KillPane {
+        target: Option<String>,
+    },
+    UpdateStatusLine {
+        line: usize,
+        content: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TmuxEvent {
+    SnapshotLoaded(TmuxSnapshot),
+    SessionAdded(TmuxSession),
+    SessionRemoved(String),
+    SessionUpdated(TmuxSession),
+    FocusChanged {
+        client_id: String,
+        session_name: String,
+        window_id: String,
+        pane_id: Option<String>,
+    },
 }
 
 impl PopupDimension {
@@ -447,6 +512,24 @@ impl TmuxClient for CommandTmuxClient {
 
         self.run_tmux(args).map(|_| ())
     }
+
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError> {
+        self.run_tmux(sidebar_pane_command(spec)).map(|_| ())
+    }
+
+    fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError> {
+        let mut args = vec!["kill-pane".to_string()];
+        if let Some(target) = target {
+            args.push("-t".to_string());
+            args.push(target.to_string());
+        }
+        self.run_tmux(args).map(|_| ())
+    }
+
+    fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError> {
+        self.run_tmux(status_line_command(line, content))
+            .map(|_| ())
+    }
 }
 
 #[must_use]
@@ -472,6 +555,179 @@ pub fn format_popup_command(command: &PopupCommand) -> String {
     parts.push(shell_escape(&command.program.display().to_string()));
     parts.extend(command.args.iter().map(|arg| shell_escape(arg)));
     parts.join(" ")
+}
+
+#[must_use]
+pub fn sidebar_pane_command(spec: &SidebarPaneSpec) -> Vec<String> {
+    let mut args = vec![
+        "split-window".to_string(),
+        "-d".to_string(),
+        "-h".to_string(),
+    ];
+    if matches!(spec.side, SidebarSide::Left) {
+        args.push("-b".to_string());
+    }
+    if let Some(target) = &spec.target {
+        args.push("-t".to_string());
+        args.push(target.clone());
+    }
+    args.push("-l".to_string());
+    args.push(spec.width.to_string());
+    args.push(format_popup_command(&spec.command));
+    args
+}
+
+#[must_use]
+pub fn status_line_command(line: usize, content: &str) -> Vec<String> {
+    let slot = line.saturating_sub(1);
+    vec![
+        "set-option".to_string(),
+        "-gq".to_string(),
+        format!("status-format[{slot}]"),
+        content.to_string(),
+    ]
+}
+
+pub trait TmuxBackend {
+    fn event_strategy(&self) -> EventStrategy;
+    fn snapshot(&self) -> Result<TmuxSnapshot, TmuxError>;
+    fn poll_events(&mut self) -> Result<Vec<TmuxEvent>, TmuxError>;
+    fn send(&self, command: TmuxCommand) -> Result<(), TmuxError>;
+    fn open_popup(&self, spec: &PopupSpec) -> Result<(), TmuxError>;
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError>;
+    fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError>;
+    fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct PollingTmuxBackend {
+    client: CommandTmuxClient,
+    query_windows: bool,
+    previous_snapshot: Option<TmuxSnapshot>,
+}
+
+impl PollingTmuxBackend {
+    #[must_use]
+    pub fn new(client: CommandTmuxClient) -> Self {
+        Self {
+            client,
+            query_windows: true,
+            previous_snapshot: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_windows(mut self, query_windows: bool) -> Self {
+        self.query_windows = query_windows;
+        self
+    }
+}
+
+impl TmuxBackend for PollingTmuxBackend {
+    fn event_strategy(&self) -> EventStrategy {
+        EventStrategy::PollingFallback
+    }
+
+    fn snapshot(&self) -> Result<TmuxSnapshot, TmuxError> {
+        self.client.snapshot(self.query_windows)
+    }
+
+    fn poll_events(&mut self) -> Result<Vec<TmuxEvent>, TmuxError> {
+        let snapshot = self.snapshot()?;
+        let events = match &self.previous_snapshot {
+            Some(previous) => diff_snapshots(previous, &snapshot),
+            None => vec![TmuxEvent::SnapshotLoaded(snapshot.clone())],
+        };
+        self.previous_snapshot = Some(snapshot);
+        Ok(events)
+    }
+
+    fn send(&self, command: TmuxCommand) -> Result<(), TmuxError> {
+        match command {
+            TmuxCommand::EnsureSession {
+                session_name,
+                directory,
+            } => self.client.ensure_session(&session_name, &directory),
+            TmuxCommand::SwitchOrAttachSession { session_name } => {
+                self.client.switch_or_attach_session(&session_name)
+            }
+            TmuxCommand::CreateOrSwitchSession {
+                session_name,
+                directory,
+            } => self
+                .client
+                .create_or_switch_session(&session_name, &directory),
+            TmuxCommand::KillPane { target } => self.client.close_sidebar_pane(target.as_deref()),
+            TmuxCommand::UpdateStatusLine { line, content } => {
+                self.client.update_status_line(line, &content)
+            }
+        }
+    }
+
+    fn open_popup(&self, spec: &PopupSpec) -> Result<(), TmuxError> {
+        self.client.open_popup(&spec.command, &spec.options)
+    }
+
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError> {
+        self.client.open_sidebar_pane(spec)
+    }
+
+    fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError> {
+        self.client.close_sidebar_pane(target)
+    }
+
+    fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError> {
+        self.client.update_status_line(line, content)
+    }
+}
+
+#[must_use]
+pub fn diff_snapshots(previous: &TmuxSnapshot, next: &TmuxSnapshot) -> Vec<TmuxEvent> {
+    let mut events = Vec::new();
+
+    for next_session in &next.sessions {
+        match previous
+            .sessions
+            .iter()
+            .find(|session| session.name == next_session.name)
+        {
+            None => events.push(TmuxEvent::SessionAdded(next_session.clone())),
+            Some(previous_session) if previous_session != next_session => {
+                events.push(TmuxEvent::SessionUpdated(next_session.clone()));
+            }
+            Some(_) => {}
+        }
+    }
+
+    for previous_session in &previous.sessions {
+        if next
+            .sessions
+            .iter()
+            .all(|session| session.name != previous_session.name)
+        {
+            events.push(TmuxEvent::SessionRemoved(previous_session.name.clone()));
+        }
+    }
+
+    if (previous.context.session_name != next.context.session_name
+        || previous.context.window_index != next.context.window_index
+        || previous.context.pane_id != next.context.pane_id)
+        && let (Some(session_name), Some(window_index)) =
+            (next.context.session_name.clone(), next.context.window_index)
+    {
+        events.push(TmuxEvent::FocusChanged {
+            client_id: next
+                .context
+                .client_tty
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            window_id: format!("{session_name}:{window_index}"),
+            session_name,
+            pane_id: next.context.pane_id.clone(),
+        });
+    }
+
+    events
 }
 
 fn shell_escape(value: &str) -> String {
@@ -588,7 +844,10 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::{
-        PopupCommand, PopupDimension, TmuxVersion, focus_session_command, format_popup_command,
+        EventStrategy, PollingTmuxBackend, PopupCommand, PopupDimension, SidebarPaneSpec,
+        SidebarSide, TmuxBackend, TmuxContext, TmuxEvent, TmuxSession, TmuxSnapshot, TmuxVersion,
+        TmuxWindow, diff_snapshots, focus_session_command, format_popup_command,
+        sidebar_pane_command, status_line_command,
     };
 
     #[test]
@@ -631,5 +890,116 @@ mod tests {
     fn formats_popup_dimensions() {
         assert_eq!(PopupDimension::Percent(80).format(), "80%");
         assert_eq!(PopupDimension::Cells(40).format(), "40");
+    }
+
+    #[test]
+    fn builds_sidebar_pane_commands() {
+        let command = PopupCommand {
+            program: PathBuf::from("/tmp/wisp"),
+            args: vec!["sidebar".to_string()],
+        };
+
+        let args = sidebar_pane_command(&SidebarPaneSpec {
+            target: Some("alpha:1".to_string()),
+            side: SidebarSide::Left,
+            width: 36,
+            command,
+        });
+
+        assert_eq!(
+            args,
+            vec![
+                "split-window",
+                "-d",
+                "-h",
+                "-b",
+                "-t",
+                "alpha:1",
+                "-l",
+                "36",
+                "'/tmp/wisp' 'sidebar'",
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_status_line_option_updates() {
+        assert_eq!(
+            status_line_command(2, "Wisp  main"),
+            vec!["set-option", "-gq", "status-format[1]", "Wisp  main"]
+        );
+    }
+
+    #[test]
+    fn diffs_snapshots_into_events() {
+        let previous = TmuxSnapshot {
+            context: TmuxContext::default(),
+            capabilities: crate::TmuxCapabilities {
+                version: TmuxVersion {
+                    major: 3,
+                    minor: 6,
+                    patch: None,
+                },
+                supports_popup: true,
+            },
+            sessions: vec![TmuxSession {
+                name: "alpha".to_string(),
+                attached: false,
+                windows: 1,
+                current: false,
+                last_activity: Some(1),
+            }],
+            windows: Vec::new(),
+        };
+        let next = TmuxSnapshot {
+            context: TmuxContext {
+                client_tty: Some("tty1".to_string()),
+                session_name: Some("beta".to_string()),
+                window_index: Some(1),
+                window_name: Some("shell".to_string()),
+                pane_id: Some("%1".to_string()),
+                inside_tmux: true,
+            },
+            capabilities: previous.capabilities.clone(),
+            sessions: vec![
+                TmuxSession {
+                    name: "alpha".to_string(),
+                    attached: true,
+                    windows: 2,
+                    current: false,
+                    last_activity: Some(2),
+                },
+                TmuxSession {
+                    name: "beta".to_string(),
+                    attached: false,
+                    windows: 1,
+                    current: true,
+                    last_activity: Some(3),
+                },
+            ],
+            windows: vec![TmuxWindow {
+                session_name: "beta".to_string(),
+                index: 1,
+                name: "shell".to_string(),
+                active: true,
+            }],
+        };
+
+        let events = diff_snapshots(&previous, &next);
+
+        assert!(events.iter().any(
+            |event| matches!(event, TmuxEvent::SessionAdded(session) if session.name == "beta")
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, TmuxEvent::SessionUpdated(session) if session.name == "alpha")
+        ));
+        assert!(events.iter().any(|event| matches!(event, TmuxEvent::FocusChanged { session_name, .. } if session_name == "beta")));
+    }
+
+    #[test]
+    fn polling_backend_reports_polling_strategy() {
+        let backend = PollingTmuxBackend::new(crate::CommandTmuxClient::new());
+
+        assert_eq!(backend.event_strategy(), EventStrategy::PollingFallback);
     }
 }

@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use wisp_tmux::{CommandTmuxClient, TmuxClient};
+use wisp_tmux::{CommandTmuxClient, PopupCommand, SidebarPaneSpec, SidebarSide, TmuxClient};
 
 struct TmuxHarness {
     socket_name: String,
@@ -32,21 +32,37 @@ impl TmuxHarness {
     }
 
     fn seed_session(&self, session_name: &str) {
-        let status = Command::new("tmux")
+        let status = self
+            .run([
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                &self.root.display().to_string(),
+            ])
+            .status
+            .code()
+            .expect("seed tmux session exit status");
+
+        assert_eq!(status, 0, "seed session should succeed");
+    }
+
+    fn run<const N: usize>(&self, args: [&str; N]) -> std::process::Output {
+        Command::new("tmux")
             .arg("-L")
             .arg(&self.socket_name)
             .arg("-f")
             .arg("/dev/null")
-            .arg("new-session")
-            .arg("-d")
-            .arg("-s")
-            .arg(session_name)
-            .arg("-c")
-            .arg(&self.root)
-            .status()
-            .expect("seed tmux session");
+            .args(args)
+            .output()
+            .expect("tmux command")
+    }
 
-        assert!(status.success(), "seed session should succeed");
+    fn read_value<const N: usize>(&self, args: [&str; N]) -> String {
+        String::from_utf8_lossy(&self.run(args).stdout)
+            .trim()
+            .to_string()
     }
 }
 
@@ -117,4 +133,44 @@ fn snapshots_include_capability_information() {
             .iter()
             .any(|session| session.name == "alpha")
     );
+}
+
+#[test]
+fn opens_sidebar_panes_and_updates_status_lines() {
+    let harness = TmuxHarness::new();
+    harness.seed_session("alpha");
+
+    harness
+        .client()
+        .open_sidebar_pane(&SidebarPaneSpec {
+            target: Some("alpha".to_string()),
+            side: SidebarSide::Left,
+            width: 30,
+            command: PopupCommand {
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-lc".to_string(), "sleep 1".to_string()],
+            },
+        })
+        .expect("open sidebar pane");
+
+    let panes = harness.read_value(["list-panes", "-t", "alpha", "-F", "#{pane_id}"]);
+    let pane_ids = panes.lines().collect::<Vec<_>>();
+    assert!(pane_ids.len() >= 2);
+
+    let sidebar_pane = pane_ids
+        .last()
+        .expect("sidebar pane id should exist")
+        .to_string();
+    harness
+        .client()
+        .close_sidebar_pane(Some(&sidebar_pane))
+        .expect("close sidebar pane");
+
+    harness
+        .client()
+        .update_status_line(2, "Wisp  main")
+        .expect("update status line");
+
+    let rendered = harness.read_value(["show-options", "-gv", "status-format[1]"]);
+    assert_eq!(rendered, "Wisp  main");
 }
