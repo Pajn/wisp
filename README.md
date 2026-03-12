@@ -1,0 +1,67 @@
+# Wisp
+
+Wisp is a native Rust tmux navigation tool inspired by `tmux-sessionx`. It shares one session-aware core across a popup picker, sidebar surfaces, and a compact tmux status-line renderer.
+
+## High-level features
+
+- tmux-aware session discovery, switching, and attachment
+- sidebar pane and sidebar popup surfaces in addition to the main picker
+- zoxide-backed directory discovery
+- fuzzy filtering and session previews
+- configurable behavior through TOML config plus environment overrides
+- strong validation with workspace-wide `fmt`, `clippy`, tests, smoke tests, and benchmark targets
+
+## Workspace layout
+
+- `wisp-core`: canonical session, alert, reducer, and projection logic
+- `wisp-config`: config defaults, loading, merge precedence, and validation
+- `wisp-tmux`: tmux snapshot/actions backend plus polling fallback
+- `wisp-zoxide`: zoxide provider and normalization
+- `wisp-preview`: preview generation and cache
+- `wisp-fuzzy`: matcher abstraction
+- `wisp-ui`: shared ratatui renderers and key translation
+- `wisp-status`: status-line formatting and dedup logic
+- `wisp-app`: app-facing state assembly helpers
+- `wisp-bin`: CLI entrypoint and runtime wiring
+
+## Quick start
+
+Requirements:
+
+- `tmux`
+- `zoxide` for directory candidates
+- Rust toolchain new enough for edition 2024
+
+Common commands:
+
+```bash
+cargo run -p wisp-bin -- doctor
+cargo run -p wisp-bin -- popup
+cargo run -p wisp-bin -- fullscreen
+cargo run -p wisp-bin -- sidebar-popup
+cargo run -p wisp-bin -- sidebar-pane
+cargo run -p wisp-bin -- status-line
+```
+
+Config file discovery:
+
+- `$WISP_CONFIG`
+- `$XDG_CONFIG_HOME/wisp/config.toml`
+- `$HOME/.config/wisp/config.toml`
+
+## Documentation
+
+- `docs/configuration.md` - full configuration reference
+- `docs/config.schema.toml` - commented TOML template you can copy into your config
+- `docs/architecture.md` - architecture overview and crate responsibilities
+
+## Quality gates
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
+cargo test -p wisp-bin --test smoke
+cargo bench -p wisp-core --bench projections --no-run
+cargo bench -p wisp-status --bench formatting --no-run
+```

@@ -1,0 +1,93 @@
+# Copy this file to:
+#   $XDG_CONFIG_HOME/wisp/config.toml
+# or
+#   $HOME/.config/wisp/config.toml
+#
+# Wisp merges configuration as:
+# defaults < config file < environment overrides < CLI overrides
+
+[ui]
+# Preferred UI mode: "auto", "popup", or "fullscreen".
+mode = "auto"
+
+# Show the inline help footer when the surface supports it.
+show_help = true
+
+# Picker preview placement: "right" or "bottom".
+preview_position = "right"
+
+# Fraction of the picker reserved for previews.
+# Valid range: 0.2 to 0.8.
+preview_width = 0.55
+
+# Shared border style: "plain", "rounded", "double", or "thick".
+border_style = "rounded"
+
+[fuzzy]
+# Matcher backend: "nucleo" or "skim".
+engine = "nucleo"
+
+# Case mode: "ignore", "respect", or "smart".
+case_mode = "smart"
+
+[tmux]
+# Query extra window information from tmux when needed.
+query_windows = false
+
+# Prefer popups when the attached tmux version supports them.
+prefer_popup = true
+
+# Popup dimensions accept either percentages like "80%"
+# or absolute cell counts like "120".
+popup_width = "80%"
+popup_height = "85%"
+
+[zoxide]
+# Enable zoxide-backed directory candidates.
+enabled = true
+
+# zoxide source mode: "query" or "frecency-list".
+mode = "query"
+
+# Maximum number of directory entries loaded from zoxide.
+max_entries = 500
+
+[preview]
+# Enable preview generation.
+enabled = true
+
+# Maximum preview work budget in milliseconds.
+# Valid range: 1 to 5000.
+timeout_ms = 120
+
+# Maximum file size read for previews.
+max_file_bytes = 262144
+
+# Enable syntax-oriented preview rendering behavior.
+syntax_highlighting = true
+
+# Preview cache capacity.
+cache_entries = 512
+
+[preview.file]
+# Show line numbers in file previews.
+line_numbers = true
+
+# Truncate long lines in plain-text file previews.
+truncate_long_lines = true
+
+[actions]
+# Valid action names:
+# "open"
+# "switch-session"
+# "open-shell-here"
+# "refresh"
+# "toggle-help"
+# "cancel"
+enter = "open"
+ctrl_s = "switch-session"
+ctrl_e = "open-shell-here"
+
+[logging]
+# Log verbosity: "error", "warn", "info", "debug", or "trace".
+level = "warn"
