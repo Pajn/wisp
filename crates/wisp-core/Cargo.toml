@@ -7,3 +7,10 @@ edition = "2024"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "projections"
+harness = false

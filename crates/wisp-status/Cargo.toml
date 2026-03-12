@@ -11,3 +11,10 @@ wisp-core = { path = "../wisp-core" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "formatting"
+harness = false
