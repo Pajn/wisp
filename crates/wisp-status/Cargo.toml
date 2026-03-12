@@ -1,0 +1,13 @@
+[package]
+name = "wisp-status"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+
+[lints]
+workspace = true

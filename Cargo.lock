@@ -221,6 +221,13 @@ name = "wisp-preview"
 version = "0.1.0"
 
 [[package]]
+name = "wisp-status"
+version = "0.1.0"
+dependencies = [
+ "wisp-core",
+]
+
+[[package]]
 name = "wisp-tmux"
 version = "0.1.0"
 dependencies = [

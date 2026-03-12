@@ -5,7 +5,7 @@ members = [
     "crates/wisp-config",
     "crates/wisp-core",
     "crates/wisp-fuzzy",
-    "crates/wisp-preview",
+    "crates/wisp-preview", "crates/wisp-status",
     "crates/wisp-tmux",
     "crates/wisp-ui",
     "crates/wisp-zoxide",
