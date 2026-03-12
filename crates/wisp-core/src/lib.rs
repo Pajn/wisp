@@ -1,6 +1,9 @@
 mod action;
 mod candidate;
+mod domain;
 mod preview;
+mod reduce;
+mod view;
 
 pub use action::{Action, CandidateAction, ResolvedAction, resolve_action, sanitize_session_name};
 pub use candidate::{
@@ -8,8 +11,17 @@ pub use candidate::{
     SessionMetadata, WindowMetadata, deduplicate_candidates, normalize_display_path,
     sort_candidates,
 };
+pub use domain::{
+    AlertAggregate, AlertState, AttentionBadge, ClientFocus, ClientId, DirectoryRecord,
+    DomainConfig, DomainSnapshot, DomainState, NotificationConfig, PaneId, PaneRecord, SessionId,
+    SessionRecord, SessionSortKey, WindowId, WindowRecord, aggregate_alerts,
+};
 pub use preview::{
     PreviewContent, PreviewKey, PreviewKind, PreviewRequest, preview_request_for_candidate,
+};
+pub use reduce::{DomainEvent, reduce_domain_event};
+pub use view::{
+    SessionListItem, StatusSessionItem, derive_candidates, derive_session_list, derive_status_items,
 };
 
 #[cfg(test)]

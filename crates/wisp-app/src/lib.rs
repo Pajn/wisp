@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use wisp_config::{ResolvedConfig, UiMode};
 use wisp_core::{
-    Candidate, CandidateId, DirectoryMetadata, PreviewContent, PreviewKey, PreviewRequest,
-    ResolvedAction, SessionMetadata, deduplicate_candidates, normalize_display_path,
-    preview_request_for_candidate, resolve_action, sort_candidates,
+    Candidate, CandidateId, ClientFocus, DirectoryRecord, DomainState, PaneRecord, PreviewContent,
+    PreviewKey, PreviewRequest, ResolvedAction, SessionRecord, SessionSortKey, WindowRecord,
+    deduplicate_candidates, derive_candidates, preview_request_for_candidate, resolve_action,
+    sort_candidates,
 };
 use wisp_tmux::TmuxSnapshot;
 use wisp_zoxide::DirectoryEntry;
@@ -279,47 +280,108 @@ pub fn rebuild_candidates(
     sources: &CandidateSources,
     options: &CandidateBuildOptions,
 ) -> Vec<Candidate> {
-    let mut candidates = tmux_session_candidates(&sources.tmux);
-    candidates.extend(zoxide_candidates(&sources.zoxide, options));
-
-    let mut candidates = deduplicate_candidates(candidates);
-    sort_candidates(&mut candidates);
-    candidates
+    let state = build_domain_state(sources);
+    derive_candidates(
+        &state,
+        options.home.as_deref(),
+        options.include_missing_directories,
+    )
 }
 
-fn tmux_session_candidates(snapshot: &TmuxSnapshot) -> Vec<Candidate> {
-    snapshot
+#[must_use]
+pub fn build_domain_state(sources: &CandidateSources) -> DomainState {
+    let sessions = sources
+        .tmux
         .sessions
         .iter()
         .map(|session| {
-            Candidate::session(SessionMetadata {
-                session_name: session.name.clone(),
-                attached: session.attached,
-                current: session.current,
-                window_count: session.windows,
-                last_activity: session.last_activity,
-            })
-        })
-        .collect()
-}
+            let windows = sources
+                .tmux
+                .windows
+                .iter()
+                .filter(|window| window.session_name == session.name)
+                .map(|window| {
+                    let pane_id = format!("{}:{}.1", session.name, window.index);
+                    (
+                        format!("{}:{}", session.name, window.index),
+                        WindowRecord {
+                            id: format!("{}:{}", session.name, window.index),
+                            index: window.index as i32,
+                            name: window.name.clone(),
+                            active: window.active,
+                            panes: std::collections::BTreeMap::from([(
+                                pane_id.clone(),
+                                PaneRecord {
+                                    id: pane_id,
+                                    index: 1,
+                                    title: None,
+                                    current_path: None,
+                                    current_command: None,
+                                    is_active: window.active,
+                                },
+                            )]),
+                            alerts: Default::default(),
+                            has_unseen: false,
+                            current_path: None,
+                            active_command: None,
+                        },
+                    )
+                })
+                .collect();
 
-fn zoxide_candidates(
-    entries: &[DirectoryEntry],
-    options: &CandidateBuildOptions,
-) -> Vec<Candidate> {
-    entries
-        .iter()
-        .filter(|entry| options.include_missing_directories || entry.exists)
-        .map(|entry| {
-            Candidate::directory(DirectoryMetadata {
-                full_path: entry.path.clone(),
-                display_path: normalize_display_path(&entry.path, options.home.as_deref()),
-                zoxide_score: entry.score,
-                git_root_hint: None,
-                exists: entry.exists,
-            })
+            (
+                session.name.clone(),
+                SessionRecord {
+                    id: session.name.clone(),
+                    name: session.name.clone(),
+                    attached: session.attached,
+                    windows,
+                    aggregate_alerts: Default::default(),
+                    has_unseen: false,
+                    sort_key: SessionSortKey {
+                        last_activity: session.last_activity,
+                    },
+                },
+            )
         })
-        .collect()
+        .collect();
+    let clients = sources
+        .tmux
+        .context
+        .session_name
+        .as_ref()
+        .zip(sources.tmux.context.window_index)
+        .map(|(session_name, window_index)| {
+            (
+                "default".to_string(),
+                ClientFocus {
+                    session_id: session_name.clone(),
+                    window_id: format!("{session_name}:{window_index}"),
+                    pane_id: sources.tmux.context.pane_id.clone(),
+                },
+            )
+        })
+        .into_iter()
+        .collect();
+    let directories = sources
+        .zoxide
+        .iter()
+        .map(|entry| DirectoryRecord {
+            path: entry.path.clone(),
+            score: entry.score,
+            exists: entry.exists,
+        })
+        .collect();
+
+    let mut state = DomainState {
+        sessions,
+        clients,
+        previous_session_by_client: Default::default(),
+        directories,
+        config: Default::default(),
+    };
+    state.recompute_aggregates();
+    state
 }
 
 #[cfg(test)]
