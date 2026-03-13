@@ -7,7 +7,7 @@ Wisp loads configuration by merging sources in this order:
 3. environment overrides
 4. CLI overrides from the config library API
 
-The current `wisp-bin` executable uses built-in environment support and config-file discovery, but it does not yet expose public CLI flags for config overrides.
+The `wisp` CLI uses built-in environment support and config-file discovery, but it does not yet expose public CLI flags for config overrides.
 
 ## Config file location
 

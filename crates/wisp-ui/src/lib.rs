@@ -385,7 +385,7 @@ fn sanitize_ansi_input(input: &str) -> String {
                     chars.next();
                     let mut sequence = String::from("\u{1b}[");
                     let mut final_byte = None;
-                    while let Some(next) = chars.next() {
+                    for next in chars.by_ref() {
                         sequence.push(next);
                         if ('@'..='~').contains(&next) {
                             final_byte = Some(next);
@@ -431,7 +431,7 @@ fn parse_ansi_line(input: &str) -> Line<'static> {
             flush_span(&mut spans, &mut plain, style);
 
             let mut sequence = String::new();
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if next == 'm' {
                     style = apply_sgr(style, &sequence);
                     break;

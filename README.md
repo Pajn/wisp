@@ -32,15 +32,41 @@ Requirements:
 - `zoxide` for directory candidates
 - Rust toolchain new enough for edition 2024
 
-Common commands:
+Install the CLI:
 
 ```bash
-cargo run -p wisp-bin -- doctor
-cargo run -p wisp-bin -- popup
-cargo run -p wisp-bin -- fullscreen
-cargo run -p wisp-bin -- sidebar-popup
-cargo run -p wisp-bin -- sidebar-pane
-cargo run -p wisp-bin -- status-line
+cargo install --git https://github.com/Pajn/wisp.git --bin wisp
+```
+
+If you want a specific revision while the project is evolving, pin a branch, tag, or commit:
+
+```bash
+cargo install --git https://github.com/Pajn/wisp.git --bin wisp --branch main
+```
+
+Common commands after install:
+
+```bash
+wisp doctor
+wisp popup
+wisp fullscreen
+wisp sidebar-popup
+wisp sidebar-pane
+wisp status-line
+```
+
+Example tmux binding:
+
+Add this to `~/.tmux.conf` to open Wisp with `prefix + o`:
+
+```tmux
+bind-key o run-shell "wisp popup"
+```
+
+If you prefer the sidebar instead of a popup:
+
+```tmux
+bind-key O run-shell "wisp sidebar-pane"
 ```
 
 Config file discovery:

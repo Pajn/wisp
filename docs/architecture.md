@@ -43,7 +43,7 @@ These crates consume projections rather than owning session state directly.
 
 ### 4. Runtime wiring
 
-`wisp-app` assembles candidate sources into domain state, while `wisp-bin` loads config, creates adapters, runs TUI surfaces, and exposes top-level commands like `doctor`, `popup`, `sidebar-pane`, and `status-line`.
+`wisp-app` assembles candidate sources into domain state, while the `wisp-bin` crate powers the installed `wisp` CLI that loads config, creates adapters, runs TUI surfaces, and exposes top-level commands like `doctor`, `popup`, `sidebar-pane`, and `status-line`.
 
 ## Data flow
 
