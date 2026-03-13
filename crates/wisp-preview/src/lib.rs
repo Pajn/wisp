@@ -375,6 +375,13 @@ mod tests {
             unreachable!("not used in test");
         }
 
+        fn list_panes(
+            &self,
+            _target: Option<&str>,
+        ) -> Result<Vec<wisp_tmux::TmuxPane>, wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
         fn capture_pane(&self, _target: &str) -> Result<String, wisp_tmux::TmuxError> {
             Ok(self.capture.clone())
         }
@@ -432,11 +439,23 @@ mod tests {
         fn open_sidebar_pane(
             &self,
             _spec: &wisp_tmux::SidebarPaneSpec,
-        ) -> Result<(), wisp_tmux::TmuxError> {
+        ) -> Result<String, wisp_tmux::TmuxError> {
             unreachable!("not used in test");
         }
 
         fn close_sidebar_pane(&self, _target: Option<&str>) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn select_pane(&self, _target: &str) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn resize_pane_width(
+            &self,
+            _target: &str,
+            _width: u16,
+        ) -> Result<(), wisp_tmux::TmuxError> {
             unreachable!("not used in test");
         }
 

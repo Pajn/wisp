@@ -69,6 +69,9 @@ If you prefer the sidebar instead of a popup:
 bind-key O run-shell "wisp sidebar-pane"
 ```
 
+`wisp sidebar-pane` keeps a Wisp sidebar pane available across the windows in the
+session you open or switch into, so it behaves more like a persistent file tree.
+
 Config file discovery:
 
 - `$WISP_CONFIG`

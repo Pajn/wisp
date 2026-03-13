@@ -3,6 +3,7 @@ use std::{
     collections::VecDeque,
     env,
     error::Error,
+    fs,
     io::stdout,
     path::{Path, PathBuf},
     process::Command,
@@ -36,6 +37,8 @@ use wisp_ui::{KeyBindings, SurfaceKind, SurfaceModel, UiIntent, render_surface, 
 use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
 
 const PREVIEW_REFRESH_DEBOUNCE: Duration = Duration::from_millis(400);
+const SIDEBAR_PANE_TITLE: &str = "Wisp Sidebar";
+const SIDEBAR_PANE_WIDTH: u16 = 36;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewMode {
@@ -63,6 +66,20 @@ struct GitStatusUpdate {
     session_id: String,
     sync: GitBranchSync,
     dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidebarUiState {
+    query: String,
+    selected_session_id: Option<String>,
+    kind: SurfaceKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidebarRuntime {
+    session_name: String,
+    home_window_index: u32,
+    pane_id: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -190,17 +207,12 @@ fn open_sidebar_popup_or_run_inline(config: &ResolvedConfig) -> Result<(), Box<d
 }
 
 fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
-    let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
-    let snapshot = backend.snapshot()?;
-    backend.open_sidebar_pane(&SidebarPaneSpec {
-        target: snapshot.context.session_name.clone(),
-        side: SidebarSide::Left,
-        width: 36,
-        command: PopupCommand {
-            program: env::current_exe()?,
-            args: vec!["ui".to_string(), "sidebar-compact".to_string()],
-        },
-    })?;
+    let tmux = CommandTmuxClient::new();
+    reconcile_sidebar_for_current_context(
+        &tmux,
+        &sidebar_surface_command(env::current_exe()?),
+        None,
+    )?;
     Ok(())
 }
 
@@ -212,8 +224,27 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         state: state.clone(),
     };
     let tmux = CommandTmuxClient::new();
-    let mut query = String::new();
-    let mut selected = 0usize;
+    let sidebar_command = sidebar_surface_command(env::current_exe()?);
+    let mut sidebar_runtime = sidebar_runtime(&tmux, kind)?;
+    let saved_sidebar_state = match &sidebar_runtime {
+        Some(runtime) => load_sidebar_ui_state(&runtime.session_name)?,
+        None => None,
+    };
+    let mut query = saved_sidebar_state
+        .as_ref()
+        .map(|state| state.query.clone())
+        .unwrap_or_default();
+    let mut selected = saved_sidebar_state
+        .as_ref()
+        .and_then(|state| {
+            let filtered = filter_items(&session_items, &query);
+            state.selected_session_id.as_ref().and_then(|session_id| {
+                filtered
+                    .iter()
+                    .position(|item| item.session_id == *session_id)
+            })
+        })
+        .unwrap_or(0);
     let mut show_help = true;
     let bindings = picker_bindings(config);
     let mut input_mode = InputMode::Filter;
@@ -222,7 +253,10 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
     let mut preview = preview_enabled.then_some(Vec::new());
     let mut preview_session_id = None;
     let mut preview_refreshed_at: Option<Instant> = None;
-    let mut surface_kind = kind;
+    let mut surface_kind = saved_sidebar_state
+        .as_ref()
+        .map(|state| state.kind)
+        .unwrap_or(kind);
     let mut first_frame = true;
     let mut pending_branch_names = git_work_items(&state);
     let branch_status_updates =
@@ -235,6 +269,18 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
 
     let result = loop {
         pane_preview_provider.max_lines = preview_line_budget(&terminal, show_help)?;
+
+        if let Some(runtime) = &sidebar_runtime
+            && sidebar_requires_handoff(&tmux, runtime)?
+        {
+            persist_sidebar_ui_state(runtime, &session_items, &query, surface_kind, selected)?;
+            reconcile_sidebar_for_current_context(
+                &tmux,
+                &sidebar_command,
+                runtime.pane_id.as_deref(),
+            )?;
+            break Ok(());
+        }
 
         let filtered = match input_mode {
             InputMode::Filter => filter_items(&session_items, &query),
@@ -401,7 +447,23 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                 UiIntent::ActivateSelected => match &input_mode {
                     InputMode::Filter => {
                         if let Some(item) = filtered.get(selected) {
+                            if let Some(runtime) = &sidebar_runtime {
+                                persist_sidebar_ui_state(
+                                    runtime,
+                                    &session_items,
+                                    &query,
+                                    surface_kind,
+                                    selected,
+                                )?;
+                            }
                             tmux.switch_or_attach_session(&item.session_id)?;
+                            if let Some(runtime) = &sidebar_runtime {
+                                reconcile_sidebar_for_current_context(
+                                    &tmux,
+                                    &sidebar_command,
+                                    runtime.pane_id.as_deref(),
+                                )?;
+                            }
                         }
                         break Ok(());
                     }
@@ -409,8 +471,10 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         session_id,
                         filter_query,
                     } => {
+                        let session_id = session_id.clone();
+                        let filter_query = filter_query.clone();
                         let new_name = query.trim().to_string();
-                        if new_name.is_empty() || new_name == *session_id {
+                        if new_name.is_empty() || new_name == session_id {
                             query = filter_query.clone();
                             input_mode = InputMode::Filter;
                             preview_session_id = None;
@@ -418,7 +482,7 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                             continue;
                         }
 
-                        tmux.rename_session(session_id, &new_name)?;
+                        tmux.rename_session(&session_id, &new_name)?;
                         let reloaded_state = load_domain_state()?;
                         session_items = derive_session_list(&reloaded_state, Some("default"));
                         details_preview_provider.state = reloaded_state.clone();
@@ -436,6 +500,12 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         preview_refreshed_at = None;
                         if preview_enabled {
                             preview = Some(Vec::new());
+                        }
+                        if let Some(runtime) = sidebar_runtime.as_mut()
+                            && runtime.session_name == session_id
+                        {
+                            clear_sidebar_ui_state(&runtime.session_name)?;
+                            runtime.session_name = new_name;
                         }
                     }
                 },
@@ -467,7 +537,17 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                     }
                 }
                 UiIntent::Close => match &input_mode {
-                    InputMode::Filter => break Ok(()),
+                    InputMode::Filter => {
+                        if let Some(runtime) = &sidebar_runtime {
+                            disable_sidebar_for_session(
+                                &tmux,
+                                &runtime.session_name,
+                                runtime.pane_id.as_deref(),
+                            )?;
+                            clear_sidebar_ui_state(&runtime.session_name)?;
+                        }
+                        break Ok(());
+                    }
                     InputMode::Rename { filter_query, .. } => {
                         query = filter_query.clone();
                         input_mode = InputMode::Filter;
@@ -475,6 +555,12 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         preview_refreshed_at = None;
                     }
                 },
+            }
+
+            if let Some(runtime) = &sidebar_runtime
+                && matches!(input_mode, InputMode::Filter)
+            {
+                persist_sidebar_ui_state(runtime, &session_items, &query, surface_kind, selected)?;
             }
         }
         show_help = matches!(surface_kind, SurfaceKind::Picker);
@@ -528,6 +614,231 @@ fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> V
         })
         .map(|content| content.body)
         .unwrap_or_else(|error| vec![error.to_string()])
+}
+
+fn sidebar_surface_command(program: PathBuf) -> PopupCommand {
+    PopupCommand {
+        program,
+        args: vec!["ui".to_string(), "sidebar-compact".to_string()],
+    }
+}
+
+fn sidebar_runtime(
+    tmux: &impl TmuxClient,
+    kind: SurfaceKind,
+) -> Result<Option<SidebarRuntime>, Box<dyn Error>> {
+    if !matches!(
+        kind,
+        SurfaceKind::SidebarCompact | SurfaceKind::SidebarExpanded
+    ) {
+        return Ok(None);
+    }
+
+    let context = tmux.current_context()?;
+    let session_name = context.session_name.ok_or_else(|| TmuxError::Unavailable {
+        message: "sidebar UI must run inside tmux".to_string(),
+    })?;
+    let home_window_index = context.window_index.ok_or_else(|| TmuxError::Unavailable {
+        message: "sidebar UI requires an active tmux window".to_string(),
+    })?;
+
+    Ok(Some(SidebarRuntime {
+        session_name,
+        home_window_index,
+        pane_id: env::var("TMUX_PANE").ok(),
+    }))
+}
+
+fn sidebar_requires_handoff(
+    tmux: &impl TmuxClient,
+    runtime: &SidebarRuntime,
+) -> Result<bool, TmuxError> {
+    let context = tmux.current_context()?;
+    Ok(
+        context.session_name.as_deref() != Some(runtime.session_name.as_str())
+            || context.window_index != Some(runtime.home_window_index),
+    )
+}
+
+fn reconcile_sidebar_for_current_context(
+    tmux: &impl TmuxClient,
+    command: &PopupCommand,
+    exclude_pane: Option<&str>,
+) -> Result<(), TmuxError> {
+    let context = tmux.current_context()?;
+    let session_name = context.session_name.ok_or_else(|| TmuxError::Unavailable {
+        message: "sidebar-pane must run inside tmux".to_string(),
+    })?;
+    let window_index = context.window_index.ok_or_else(|| TmuxError::Unavailable {
+        message: "sidebar-pane requires an active tmux window".to_string(),
+    })?;
+    reconcile_sidebar_for_window(tmux, &session_name, window_index, command, exclude_pane)
+}
+
+fn reconcile_sidebar_for_window(
+    tmux: &impl TmuxClient,
+    session_name: &str,
+    active_window_index: u32,
+    command: &PopupCommand,
+    exclude_pane: Option<&str>,
+) -> Result<(), TmuxError> {
+    let mut sidebars = tmux
+        .list_panes(None)?
+        .into_iter()
+        .filter(|pane| pane.session_name == session_name && pane.title == SIDEBAR_PANE_TITLE)
+        .collect::<Vec<_>>();
+
+    let keep_index = sidebars
+        .iter()
+        .position(|pane| {
+            pane.window_index == active_window_index
+                && exclude_pane.is_some_and(|exclude| pane.pane_id == exclude)
+        })
+        .or_else(|| {
+            sidebars
+                .iter()
+                .position(|pane| pane.window_index == active_window_index && pane.active)
+        })
+        .or_else(|| {
+            sidebars
+                .iter()
+                .position(|pane| pane.window_index == active_window_index)
+        });
+
+    let keep_pane_id = match keep_index {
+        Some(index) => sidebars[index].pane_id.clone(),
+        None => tmux.open_sidebar_pane(&SidebarPaneSpec {
+            target: Some(format!("{session_name}:{active_window_index}")),
+            side: SidebarSide::Left,
+            width: SIDEBAR_PANE_WIDTH,
+            title: Some(SIDEBAR_PANE_TITLE.to_string()),
+            command: command.clone(),
+        })?,
+    };
+
+    tmux.resize_pane_width(&keep_pane_id, SIDEBAR_PANE_WIDTH)?;
+
+    for pane in sidebars.drain(..) {
+        if pane.pane_id != keep_pane_id && Some(pane.pane_id.as_str()) != exclude_pane {
+            tmux.close_sidebar_pane(Some(&pane.pane_id))?;
+        }
+    }
+
+    tmux.select_pane(&keep_pane_id)?;
+    Ok(())
+}
+
+fn disable_sidebar_for_session(
+    tmux: &impl TmuxClient,
+    session_name: &str,
+    exclude_pane: Option<&str>,
+) -> Result<(), TmuxError> {
+    for pane in tmux
+        .list_panes(None)?
+        .into_iter()
+        .filter(|pane| pane.session_name == session_name && pane.title == SIDEBAR_PANE_TITLE)
+    {
+        if Some(pane.pane_id.as_str()) != exclude_pane {
+            tmux.close_sidebar_pane(Some(&pane.pane_id))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sidebar_state_dir() -> PathBuf {
+    env::var_os("WISP_SIDEBAR_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::temp_dir().join("wisp-sidebar"))
+}
+
+fn sidebar_state_path(session_name: &str) -> PathBuf {
+    let sanitized = session_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    sidebar_state_dir().join(format!("{sanitized}.state"))
+}
+
+fn load_sidebar_ui_state(session_name: &str) -> Result<Option<SidebarUiState>, Box<dyn Error>> {
+    let path = sidebar_state_path(session_name);
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Box::new(error)),
+    };
+
+    let mut parts = raw.splitn(3, '\n');
+    let kind = match parts.next().unwrap_or_default().trim() {
+        "compact" => SurfaceKind::SidebarCompact,
+        "expanded" => SurfaceKind::SidebarExpanded,
+        value => {
+            return Err(format!("invalid sidebar state kind `{value}`").into());
+        }
+    };
+    let selected_session_id = match parts.next() {
+        Some(value) if !value.trim().is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let query = parts.next().unwrap_or_default().to_string();
+
+    Ok(Some(SidebarUiState {
+        query,
+        selected_session_id,
+        kind,
+    }))
+}
+
+fn persist_sidebar_ui_state(
+    runtime: &SidebarRuntime,
+    session_items: &[SessionListItem],
+    query: &str,
+    kind: SurfaceKind,
+    selected: usize,
+) -> Result<(), Box<dyn Error>> {
+    let filtered = filter_items(session_items, query);
+    let state = SidebarUiState {
+        query: query.to_string(),
+        selected_session_id: filtered.get(selected).map(|item| item.session_id.clone()),
+        kind: match kind {
+            SurfaceKind::SidebarExpanded => SurfaceKind::SidebarExpanded,
+            _ => SurfaceKind::SidebarCompact,
+        },
+    };
+    let path = sidebar_state_path(&runtime.session_name);
+    let directory = path
+        .parent()
+        .ok_or_else(|| format!("missing parent directory for `{}`", path.display()))?;
+    fs::create_dir_all(directory)?;
+
+    let kind_token = match state.kind {
+        SurfaceKind::SidebarExpanded => "expanded",
+        SurfaceKind::SidebarCompact => "compact",
+        SurfaceKind::Picker => "compact",
+    };
+    let payload = format!(
+        "{kind_token}\n{}\n{}",
+        state.selected_session_id.as_deref().unwrap_or_default(),
+        state.query
+    );
+    let temporary_path = path.with_extension("tmp");
+    fs::write(&temporary_path, payload)?;
+    fs::rename(temporary_path, path)?;
+    Ok(())
+}
+
+fn clear_sidebar_ui_state(session_name: &str) -> Result<(), Box<dyn Error>> {
+    match fs::remove_file(sidebar_state_path(session_name)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Box::new(error)),
+    }
 }
 
 fn load_domain_state() -> Result<DomainState, Box<dyn Error>> {
@@ -672,7 +983,7 @@ fn branch_name_for_directory(path: &Path) -> Option<String> {
 
 fn branch_name_for_git_root(path: &Path) -> Option<String> {
     let git_dir = resolve_git_dir(path)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
 
     if let Some(reference) = head.strip_prefix("ref: ") {
@@ -692,7 +1003,7 @@ fn resolve_git_dir(path: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let pointer = fs::read_to_string(&dot_git).ok()?;
     let target = pointer.trim().strip_prefix("gitdir: ")?;
     let git_dir = Path::new(target);
     if git_dir.is_absolute() {
@@ -734,4 +1045,365 @@ fn filter_items(items: &[SessionListItem], query: &str) -> Vec<SessionListItem> 
                 .cloned()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::RefCell,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use wisp_tmux::{
+        PopupCommand, PopupOptions, SidebarPaneSpec, TmuxCapabilities, TmuxClient, TmuxContext,
+        TmuxError, TmuxPane, TmuxSession, TmuxSnapshot, TmuxVersion, TmuxWindow,
+    };
+
+    use crate::{
+        SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, SidebarRuntime, SurfaceKind,
+        clear_sidebar_ui_state, disable_sidebar_for_session, load_sidebar_ui_state,
+        persist_sidebar_ui_state, reconcile_sidebar_for_current_context, sidebar_requires_handoff,
+        sidebar_surface_command,
+    };
+
+    #[derive(Default)]
+    struct StubTmuxClient {
+        context: TmuxContext,
+        windows: Vec<TmuxWindow>,
+        panes: Vec<TmuxPane>,
+        opened_targets: RefCell<Vec<String>>,
+        closed_panes: RefCell<Vec<String>>,
+        selected_panes: RefCell<Vec<String>>,
+        resized_panes: RefCell<Vec<(String, u16)>>,
+    }
+
+    impl StubTmuxClient {
+        fn with_context(mut self, context: TmuxContext) -> Self {
+            self.context = context;
+            self
+        }
+
+        fn with_windows(mut self, windows: Vec<TmuxWindow>) -> Self {
+            self.windows = windows;
+            self
+        }
+
+        fn with_panes(mut self, panes: Vec<TmuxPane>) -> Self {
+            self.panes.extend(panes);
+            self
+        }
+    }
+
+    impl TmuxClient for StubTmuxClient {
+        fn capabilities(&self) -> Result<TmuxCapabilities, TmuxError> {
+            Ok(TmuxCapabilities {
+                version: TmuxVersion {
+                    major: 3,
+                    minor: 4,
+                    patch: None,
+                },
+                supports_popup: true,
+            })
+        }
+
+        fn current_context(&self) -> Result<TmuxContext, TmuxError> {
+            Ok(self.context.clone())
+        }
+
+        fn list_sessions(&self) -> Result<Vec<TmuxSession>, TmuxError> {
+            Ok(Vec::new())
+        }
+
+        fn list_windows(&self) -> Result<Vec<TmuxWindow>, TmuxError> {
+            Ok(self.windows.clone())
+        }
+
+        fn list_panes(&self, target: Option<&str>) -> Result<Vec<TmuxPane>, TmuxError> {
+            Ok(match target {
+                Some(target) => {
+                    let mut parts = target.split(':');
+                    let session_name = parts.next().unwrap_or_default();
+                    let window_index = parts
+                        .next()
+                        .and_then(|raw| raw.parse::<u32>().ok())
+                        .unwrap_or_default();
+                    self.panes
+                        .iter()
+                        .filter(|pane| {
+                            pane.session_name == session_name && pane.window_index == window_index
+                        })
+                        .cloned()
+                        .collect()
+                }
+                None => self.panes.clone(),
+            })
+        }
+
+        fn capture_pane(&self, _target: &str) -> Result<String, TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn snapshot(&self, _query_windows: bool) -> Result<TmuxSnapshot, TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn ensure_session(&self, _session_name: &str, _directory: &Path) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn switch_or_attach_session(&self, _session_name: &str) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn rename_session(&self, _session_name: &str, _new_name: &str) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn kill_session(&self, _session_name: &str) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn create_or_switch_session(
+            &self,
+            _session_name: &str,
+            _directory: &Path,
+        ) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn open_popup(
+            &self,
+            _command: &PopupCommand,
+            _options: &PopupOptions,
+        ) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<String, TmuxError> {
+            self.opened_targets
+                .borrow_mut()
+                .push(spec.target.clone().expect("sidebar target"));
+            Ok("%new".to_string())
+        }
+
+        fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError> {
+            self.closed_panes
+                .borrow_mut()
+                .push(target.expect("target pane").to_string());
+            Ok(())
+        }
+
+        fn select_pane(&self, target: &str) -> Result<(), TmuxError> {
+            self.selected_panes.borrow_mut().push(target.to_string());
+            Ok(())
+        }
+
+        fn resize_pane_width(&self, target: &str, width: u16) -> Result<(), TmuxError> {
+            self.resized_panes
+                .borrow_mut()
+                .push((target.to_string(), width));
+            Ok(())
+        }
+
+        fn update_status_line(&self, _line: usize, _content: &str) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+    }
+
+    #[test]
+    fn reconcile_sidebar_keeps_only_the_active_window_sidebar() {
+        let tmux = StubTmuxClient::default()
+            .with_context(TmuxContext {
+                session_name: Some("alpha".to_string()),
+                window_index: Some(2),
+                ..TmuxContext::default()
+            })
+            .with_panes(vec![
+                TmuxPane {
+                    session_name: "alpha".to_string(),
+                    window_index: 1,
+                    pane_id: "%stale".to_string(),
+                    title: SIDEBAR_PANE_TITLE.to_string(),
+                    active: false,
+                    current_command: Some("wisp".to_string()),
+                },
+                TmuxPane {
+                    session_name: "alpha".to_string(),
+                    window_index: 2,
+                    pane_id: "%keep".to_string(),
+                    title: SIDEBAR_PANE_TITLE.to_string(),
+                    active: true,
+                    current_command: Some("wisp".to_string()),
+                },
+            ])
+            .with_windows(vec![TmuxWindow {
+                session_name: "alpha".to_string(),
+                index: 2,
+                name: "logs".to_string(),
+                active: true,
+                current_path: None,
+                current_command: None,
+            }]);
+
+        reconcile_sidebar_for_current_context(
+            &tmux,
+            &sidebar_surface_command(PathBuf::from("/tmp/wisp")),
+            None,
+        )
+        .expect("sidebar should reconcile");
+
+        assert!(tmux.opened_targets.borrow().is_empty());
+        assert_eq!(&*tmux.closed_panes.borrow(), &["%stale".to_string()]);
+        assert_eq!(&*tmux.selected_panes.borrow(), &["%keep".to_string()]);
+        assert_eq!(
+            &*tmux.resized_panes.borrow(),
+            &[("%keep".to_string(), SIDEBAR_PANE_WIDTH)]
+        );
+    }
+
+    #[test]
+    fn reconcile_sidebar_opens_a_new_sidebar_when_the_active_window_has_none() {
+        let tmux = StubTmuxClient::default()
+            .with_context(TmuxContext {
+                session_name: Some("alpha".to_string()),
+                window_index: Some(2),
+                ..TmuxContext::default()
+            })
+            .with_panes(vec![TmuxPane {
+                session_name: "alpha".to_string(),
+                window_index: 1,
+                pane_id: "%old".to_string(),
+                title: SIDEBAR_PANE_TITLE.to_string(),
+                active: false,
+                current_command: Some("wisp".to_string()),
+            }]);
+
+        reconcile_sidebar_for_current_context(
+            &tmux,
+            &sidebar_surface_command(PathBuf::from("/tmp/wisp")),
+            Some("%old"),
+        )
+        .expect("sidebar should be created");
+
+        assert_eq!(&*tmux.opened_targets.borrow(), &["alpha:2".to_string()]);
+        assert!(tmux.closed_panes.borrow().is_empty());
+        assert_eq!(&*tmux.selected_panes.borrow(), &["%new".to_string()]);
+        assert_eq!(
+            &*tmux.resized_panes.borrow(),
+            &[("%new".to_string(), SIDEBAR_PANE_WIDTH)]
+        );
+    }
+
+    #[test]
+    fn disable_sidebar_closes_other_sidebar_panes_in_the_session() {
+        let tmux = StubTmuxClient::default().with_panes(vec![
+            TmuxPane {
+                session_name: "alpha".to_string(),
+                window_index: 1,
+                pane_id: "%1".to_string(),
+                title: SIDEBAR_PANE_TITLE.to_string(),
+                active: false,
+                current_command: Some("wisp".to_string()),
+            },
+            TmuxPane {
+                session_name: "alpha".to_string(),
+                window_index: 2,
+                pane_id: "%2".to_string(),
+                title: SIDEBAR_PANE_TITLE.to_string(),
+                active: false,
+                current_command: Some("wisp".to_string()),
+            },
+            TmuxPane {
+                session_name: "beta".to_string(),
+                window_index: 1,
+                pane_id: "%3".to_string(),
+                title: SIDEBAR_PANE_TITLE.to_string(),
+                active: false,
+                current_command: Some("wisp".to_string()),
+            },
+        ]);
+
+        disable_sidebar_for_session(&tmux, "alpha", Some("%2")).expect("sidebars should be closed");
+
+        assert_eq!(&*tmux.closed_panes.borrow(), &["%1".to_string()]);
+    }
+
+    #[test]
+    fn sidebar_state_round_trips_query_selection_and_kind() {
+        let session_name = format!("alpha-{}", unique_suffix());
+
+        let runtime = SidebarRuntime {
+            session_name: session_name.clone(),
+            home_window_index: 1,
+            pane_id: Some("%1".to_string()),
+        };
+        let items = vec![session_item("alpha"), session_item("beta")];
+        persist_sidebar_ui_state(&runtime, &items, "be", SurfaceKind::SidebarExpanded, 0)
+            .expect("state should persist");
+
+        let state = load_sidebar_ui_state(&session_name)
+            .expect("state should load")
+            .expect("state should exist");
+        assert_eq!(state.query, "be");
+        assert_eq!(state.selected_session_id.as_deref(), Some("beta"));
+        assert_eq!(state.kind, SurfaceKind::SidebarExpanded);
+
+        clear_sidebar_ui_state(&session_name).expect("state should clear");
+        assert!(
+            load_sidebar_ui_state(&session_name)
+                .expect("state should load")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn sidebar_handoff_only_triggers_when_session_or_window_changes() {
+        let tmux = StubTmuxClient::default().with_context(TmuxContext {
+            session_name: Some("alpha".to_string()),
+            window_index: Some(2),
+            ..TmuxContext::default()
+        });
+        let runtime = SidebarRuntime {
+            session_name: "alpha".to_string(),
+            home_window_index: 1,
+            pane_id: Some("%1".to_string()),
+        };
+
+        assert!(sidebar_requires_handoff(&tmux, &runtime).expect("handoff should evaluate"));
+        assert!(
+            !sidebar_requires_handoff(
+                &StubTmuxClient::default().with_context(TmuxContext {
+                    session_name: Some("alpha".to_string()),
+                    window_index: Some(1),
+                    ..TmuxContext::default()
+                }),
+                &runtime,
+            )
+            .expect("handoff should evaluate")
+        );
+    }
+
+    fn session_item(session_id: &str) -> wisp_core::SessionListItem {
+        wisp_core::SessionListItem {
+            session_id: session_id.to_string(),
+            label: session_id.to_string(),
+            is_current: false,
+            is_previous: false,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: None,
+            command_hint: None,
+            git_branch: None,
+        }
+    }
+
+    fn unique_suffix() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    }
 }

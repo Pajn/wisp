@@ -176,6 +176,7 @@ fn opens_sidebar_panes_and_updates_status_lines() {
             target: Some("alpha".to_string()),
             side: SidebarSide::Left,
             width: 30,
+            title: Some("Wisp Sidebar".to_string()),
             command: PopupCommand {
                 program: PathBuf::from("/bin/sh"),
                 args: vec!["-lc".to_string(), "sleep 1".to_string()],
@@ -183,14 +184,26 @@ fn opens_sidebar_panes_and_updates_status_lines() {
         })
         .expect("open sidebar pane");
 
-    let panes = harness.read_value(["list-panes", "-t", "alpha", "-F", "#{pane_id}"]);
-    let pane_ids = panes.lines().collect::<Vec<_>>();
-    assert!(pane_ids.len() >= 2);
+    let panes = harness.read_value([
+        "list-panes",
+        "-t",
+        "alpha",
+        "-F",
+        "#{pane_id}\t#{pane_title}\t#{pane_width}",
+    ]);
+    let pane_rows = panes.lines().collect::<Vec<_>>();
+    assert!(pane_rows.len() >= 2);
 
-    let sidebar_pane = pane_ids
-        .last()
-        .expect("sidebar pane id should exist")
-        .to_string();
+    let sidebar_pane = pane_rows
+        .iter()
+        .find_map(|row| {
+            let mut fields = row.split('\t');
+            let pane_id = fields.next()?;
+            let pane_title = fields.next()?;
+            let pane_width = fields.next()?;
+            (pane_title == "Wisp Sidebar" && pane_width == "30").then(|| pane_id.to_string())
+        })
+        .expect("sidebar pane id should exist");
     harness
         .client()
         .close_sidebar_pane(Some(&sidebar_pane))

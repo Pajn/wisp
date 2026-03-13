@@ -12,6 +12,7 @@ pub trait TmuxClient {
     fn current_context(&self) -> Result<TmuxContext, TmuxError>;
     fn list_sessions(&self) -> Result<Vec<TmuxSession>, TmuxError>;
     fn list_windows(&self) -> Result<Vec<TmuxWindow>, TmuxError>;
+    fn list_panes(&self, target: Option<&str>) -> Result<Vec<TmuxPane>, TmuxError>;
     fn capture_pane(&self, target: &str) -> Result<String, TmuxError>;
     fn snapshot(&self, query_windows: bool) -> Result<TmuxSnapshot, TmuxError>;
     fn ensure_session(&self, session_name: &str, directory: &Path) -> Result<(), TmuxError>;
@@ -24,8 +25,10 @@ pub trait TmuxClient {
         directory: &Path,
     ) -> Result<(), TmuxError>;
     fn open_popup(&self, command: &PopupCommand, options: &PopupOptions) -> Result<(), TmuxError>;
-    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError>;
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<String, TmuxError>;
     fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError>;
+    fn select_pane(&self, target: &str) -> Result<(), TmuxError>;
+    fn resize_pane_width(&self, target: &str, width: u16) -> Result<(), TmuxError>;
     fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError>;
 }
 
@@ -69,6 +72,16 @@ pub struct TmuxWindow {
     pub name: String,
     pub active: bool,
     pub current_path: Option<PathBuf>,
+    pub current_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxPane {
+    pub session_name: String,
+    pub window_index: u32,
+    pub pane_id: String,
+    pub title: String,
+    pub active: bool,
     pub current_command: Option<String>,
 }
 
@@ -118,6 +131,7 @@ pub struct SidebarPaneSpec {
     pub target: Option<String>,
     pub side: SidebarSide,
     pub width: u16,
+    pub title: Option<String>,
     pub command: PopupCommand,
 }
 
@@ -439,6 +453,30 @@ impl TmuxClient for CommandTmuxClient {
         parse_windows(&output)
     }
 
+    fn list_panes(&self, target: Option<&str>) -> Result<Vec<TmuxPane>, TmuxError> {
+        let mut args = vec![
+            "list-panes".to_string(),
+            "-F".to_string(),
+            "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_title}\t#{pane_active}\t#{pane_current_command}".to_string(),
+        ];
+        if let Some(target) = target {
+            args.push("-t".to_string());
+            args.push(target.to_string());
+        } else {
+            args.push("-a".to_string());
+        }
+
+        let output = match self.run_tmux(args) {
+            Ok(output) => output,
+            Err(TmuxError::CommandFailed { stderr, .. }) if is_no_server_error(&stderr) => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+
+        parse_panes(&output)
+    }
+
     fn capture_pane(&self, target: &str) -> Result<String, TmuxError> {
         self.run_tmux(vec![
             "capture-pane".to_string(),
@@ -547,8 +585,13 @@ impl TmuxClient for CommandTmuxClient {
         self.run_tmux(args).map(|_| ())
     }
 
-    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError> {
-        self.run_tmux(sidebar_pane_command(spec)).map(|_| ())
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<String, TmuxError> {
+        let pane_id = self.run_tmux(sidebar_pane_command(spec))?;
+        if let Some(title) = &spec.title {
+            self.run_tmux(select_pane_title_command(&pane_id, title))
+                .map(|_| ())?;
+        }
+        Ok(pane_id)
     }
 
     fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError> {
@@ -558,6 +601,15 @@ impl TmuxClient for CommandTmuxClient {
             args.push(target.to_string());
         }
         self.run_tmux(args).map(|_| ())
+    }
+
+    fn select_pane(&self, target: &str) -> Result<(), TmuxError> {
+        self.run_tmux(select_pane_command(target)).map(|_| ())
+    }
+
+    fn resize_pane_width(&self, target: &str, width: u16) -> Result<(), TmuxError> {
+        self.run_tmux(resize_pane_width_command(target, width))
+            .map(|_| ())
     }
 
     fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError> {
@@ -597,6 +649,9 @@ pub fn sidebar_pane_command(spec: &SidebarPaneSpec) -> Vec<String> {
         "split-window".to_string(),
         "-d".to_string(),
         "-h".to_string(),
+        "-P".to_string(),
+        "-F".to_string(),
+        "#{pane_id}".to_string(),
     ];
     if matches!(spec.side, SidebarSide::Left) {
         args.push("-b".to_string());
@@ -609,6 +664,37 @@ pub fn sidebar_pane_command(spec: &SidebarPaneSpec) -> Vec<String> {
     args.push(spec.width.to_string());
     args.push(format_popup_command(&spec.command));
     args
+}
+
+#[must_use]
+pub fn select_pane_command(target: &str) -> Vec<String> {
+    vec![
+        "select-pane".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
+}
+
+#[must_use]
+pub fn select_pane_title_command(target: &str, title: &str) -> Vec<String> {
+    vec![
+        "select-pane".to_string(),
+        "-T".to_string(),
+        title.to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
+}
+
+#[must_use]
+pub fn resize_pane_width_command(target: &str, width: u16) -> Vec<String> {
+    vec![
+        "resize-pane".to_string(),
+        "-x".to_string(),
+        width.to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
 }
 
 #[must_use]
@@ -628,8 +714,9 @@ pub trait TmuxBackend {
     fn poll_events(&mut self) -> Result<Vec<TmuxEvent>, TmuxError>;
     fn send(&self, command: TmuxCommand) -> Result<(), TmuxError>;
     fn open_popup(&self, spec: &PopupSpec) -> Result<(), TmuxError>;
-    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError>;
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<String, TmuxError>;
     fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError>;
+    fn resize_pane_width(&self, target: &str, width: u16) -> Result<(), TmuxError>;
     fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError>;
 }
 
@@ -702,12 +789,16 @@ impl TmuxBackend for PollingTmuxBackend {
         self.client.open_popup(&spec.command, &spec.options)
     }
 
-    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<(), TmuxError> {
+    fn open_sidebar_pane(&self, spec: &SidebarPaneSpec) -> Result<String, TmuxError> {
         self.client.open_sidebar_pane(spec)
     }
 
     fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError> {
         self.client.close_sidebar_pane(target)
+    }
+
+    fn resize_pane_width(&self, target: &str, width: u16) -> Result<(), TmuxError> {
+        self.client.resize_pane_width(target, width)
     }
 
     fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError> {
@@ -841,6 +932,36 @@ fn parse_windows(output: &str) -> Result<Vec<TmuxWindow>, TmuxError> {
         .collect()
 }
 
+fn parse_panes(output: &str) -> Result<Vec<TmuxPane>, TmuxError> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut fields = line.split('\t');
+            let session_name = required_field(fields.next(), "pane session", line)?;
+            let window_index = required_field(fields.next(), "pane window index", line)?
+                .parse::<u32>()
+                .map_err(|_| TmuxError::Parse {
+                    context: "tmux panes",
+                    message: format!("invalid window index in `{line}`"),
+                })?;
+            let pane_id = required_field(fields.next(), "pane id", line)?;
+            let title = required_field(fields.next(), "pane title", line)?;
+            let active = parse_numeric_bool(required_field(fields.next(), "pane active", line)?)?;
+            let current_command = empty_to_none(fields.next());
+
+            Ok(TmuxPane {
+                session_name: session_name.to_string(),
+                window_index,
+                pane_id: pane_id.to_string(),
+                title: title.to_string(),
+                active,
+                current_command,
+            })
+        })
+        .collect()
+}
+
 fn parse_numeric_bool(value: &str) -> Result<bool, TmuxError> {
     value
         .parse::<u8>()
@@ -883,8 +1004,9 @@ mod tests {
 
     use crate::{
         EventStrategy, PollingTmuxBackend, PopupCommand, PopupDimension, SidebarPaneSpec,
-        SidebarSide, TmuxBackend, TmuxContext, TmuxEvent, TmuxSession, TmuxSnapshot, TmuxVersion,
-        TmuxWindow, diff_snapshots, focus_session_command, format_popup_command,
+        SidebarSide, TmuxBackend, TmuxContext, TmuxEvent, TmuxPane, TmuxSession, TmuxSnapshot,
+        TmuxVersion, TmuxWindow, diff_snapshots, focus_session_command, format_popup_command,
+        parse_panes, resize_pane_width_command, select_pane_command, select_pane_title_command,
         sidebar_pane_command, status_line_command,
     };
 
@@ -941,6 +1063,7 @@ mod tests {
             target: Some("alpha:1".to_string()),
             side: SidebarSide::Left,
             width: 36,
+            title: Some("Wisp Sidebar".to_string()),
             command,
         });
 
@@ -950,6 +1073,9 @@ mod tests {
                 "split-window",
                 "-d",
                 "-h",
+                "-P",
+                "-F",
+                "#{pane_id}",
                 "-b",
                 "-t",
                 "alpha:1",
@@ -957,6 +1083,37 @@ mod tests {
                 "36",
                 "'/tmp/wisp' 'sidebar'",
             ]
+        );
+    }
+
+    #[test]
+    fn parses_tmux_panes() {
+        let panes =
+            parse_panes("alpha\t1\t%7\tWisp Sidebar\t1\twisp\n").expect("panes should parse");
+
+        assert_eq!(
+            panes,
+            vec![TmuxPane {
+                session_name: "alpha".to_string(),
+                window_index: 1,
+                pane_id: "%7".to_string(),
+                title: "Wisp Sidebar".to_string(),
+                active: true,
+                current_command: Some("wisp".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn builds_select_pane_commands() {
+        assert_eq!(select_pane_command("%3"), vec!["select-pane", "-t", "%3"]);
+        assert_eq!(
+            select_pane_title_command("%3", "Wisp Sidebar"),
+            vec!["select-pane", "-T", "Wisp Sidebar", "-t", "%3"]
+        );
+        assert_eq!(
+            resize_pane_width_command("%3", 36),
+            vec!["resize-pane", "-x", "36", "-t", "%3"]
         );
     }
 
