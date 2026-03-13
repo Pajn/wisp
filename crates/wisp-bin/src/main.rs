@@ -39,6 +39,13 @@ enum PreviewMode {
     Details,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupStage {
+    BareList,
+    BranchesReady,
+    Interactive,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -177,7 +184,7 @@ fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
 
 fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
-    let session_items = session_list_items(&state);
+    let mut session_items = derive_session_list(&state, Some("default"));
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
     let details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
@@ -188,10 +195,11 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let mut show_help = true;
     let mut preview_enabled = matches!(kind, SurfaceKind::Picker);
     let mut preview_mode = PreviewMode::Pane;
-    let mut preview = None;
+    let mut preview = preview_enabled.then_some(Vec::new());
     let mut preview_session_id = None;
     let mut preview_refreshed_at: Option<Instant> = None;
     let mut surface_kind = kind;
+    let mut startup_stage = StartupStage::BareList;
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -205,7 +213,8 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             selected = filtered.len().saturating_sub(1);
         }
         let selected_item = filtered.get(selected);
-        let should_refresh_preview = preview_enabled
+        let should_refresh_preview = startup_stage == StartupStage::Interactive
+            && preview_enabled
             && selected_item.is_some()
             && match (
                 selected_item,
@@ -242,7 +251,7 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             preview_session_id = Some(item.session_id.clone());
             preview_refreshed_at = Some(Instant::now());
         } else if selected_item.is_none() {
-            preview = None;
+            preview = Some(Vec::new());
             preview_session_id = None;
             preview_refreshed_at = None;
         }
@@ -266,6 +275,21 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             frame.render_widget(Clear, area);
             render_surface(area, frame.buffer_mut(), &model);
         })?;
+
+        match startup_stage {
+            StartupStage::BareList => {
+                enrich_session_list_items(&mut session_items, &state);
+                startup_stage = StartupStage::BranchesReady;
+                continue;
+            }
+            StartupStage::BranchesReady => {
+                startup_stage = StartupStage::Interactive;
+                preview_session_id = None;
+                preview_refreshed_at = None;
+                continue;
+            }
+            StartupStage::Interactive => {}
+        }
 
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key) = event::read()?
@@ -297,6 +321,9 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
                 }
                 UiIntent::TogglePreview => {
                     preview_enabled = !preview_enabled;
+                    preview = preview_enabled.then_some(Vec::new());
+                    preview_session_id = None;
+                    preview_refreshed_at = None;
                 }
                 UiIntent::ToggleDetails => {
                     preview_mode = match preview_mode {
@@ -352,13 +379,11 @@ fn load_domain_state() -> Result<DomainState, Box<dyn Error>> {
     Ok(build_domain_state(&CandidateSources { tmux, zoxide }))
 }
 
-fn session_list_items(state: &DomainState) -> Vec<SessionListItem> {
-    let mut items = derive_session_list(state, Some("default"));
+fn enrich_session_list_items(items: &mut [SessionListItem], state: &DomainState) {
     let branches = git_branches_by_session(state);
-    for item in &mut items {
+    for item in items {
         item.git_branch = branches.get(&item.session_id).cloned();
     }
-    items
 }
 
 fn git_branches_by_session(
