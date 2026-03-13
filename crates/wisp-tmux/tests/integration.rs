@@ -2,7 +2,8 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use wisp_tmux::{CommandTmuxClient, PopupCommand, SidebarPaneSpec, SidebarSide, TmuxClient};
@@ -133,6 +134,35 @@ fn snapshots_include_capability_information() {
             .iter()
             .any(|session| session.name == "alpha")
     );
+}
+
+#[test]
+fn captures_active_pane_from_selected_session() {
+    let harness = TmuxHarness::new();
+    let status = harness
+        .run([
+            "new-session",
+            "-d",
+            "-s",
+            "alpha",
+            "-c",
+            &harness.root.display().to_string(),
+            "printf 'alpha pane\\nline two\\n'; sleep 5",
+        ])
+        .status
+        .code()
+        .expect("seed tmux session exit status");
+
+    assert_eq!(status, 0, "seed session should succeed");
+    thread::sleep(Duration::from_millis(200));
+
+    let captured = harness
+        .client()
+        .capture_pane("alpha")
+        .expect("capture active pane");
+
+    assert!(captured.contains("alpha pane"));
+    assert!(captured.contains("line two"));
 }
 
 #[test]

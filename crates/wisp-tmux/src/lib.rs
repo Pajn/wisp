@@ -12,6 +12,7 @@ pub trait TmuxClient {
     fn current_context(&self) -> Result<TmuxContext, TmuxError>;
     fn list_sessions(&self) -> Result<Vec<TmuxSession>, TmuxError>;
     fn list_windows(&self) -> Result<Vec<TmuxWindow>, TmuxError>;
+    fn capture_pane(&self, target: &str) -> Result<String, TmuxError>;
     fn snapshot(&self, query_windows: bool) -> Result<TmuxSnapshot, TmuxError>;
     fn ensure_session(&self, session_name: &str, directory: &Path) -> Result<(), TmuxError>;
     fn switch_or_attach_session(&self, session_name: &str) -> Result<(), TmuxError>;
@@ -432,6 +433,15 @@ impl TmuxClient for CommandTmuxClient {
         };
 
         parse_windows(&output)
+    }
+
+    fn capture_pane(&self, target: &str) -> Result<String, TmuxError> {
+        self.run_tmux(vec![
+            "capture-pane".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            target.to_string(),
+        ])
     }
 
     fn snapshot(&self, query_windows: bool) -> Result<TmuxSnapshot, TmuxError> {

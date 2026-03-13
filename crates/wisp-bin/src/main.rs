@@ -1,4 +1,10 @@
-use std::{env, error::Error, io::stdout, process::ExitCode, time::Duration};
+use std::{
+    env,
+    error::Error,
+    io::stdout,
+    process::ExitCode,
+    time::{Duration, Instant},
+};
 
 use crossterm::{
     event::{self, Event},
@@ -13,7 +19,7 @@ use wisp_core::{
     derive_status_items,
 };
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
-use wisp_preview::{PreviewProvider, SessionPreviewProvider};
+use wisp_preview::{ActivePanePreviewProvider, PreviewProvider, SessionDetailsPreviewProvider};
 use wisp_status::{StatusFormatOptions, StatusRenderState};
 use wisp_tmux::{
     CommandTmuxClient, PollingTmuxBackend, PopupCommand, PopupOptions, PopupSpec, SidebarPaneSpec,
@@ -21,6 +27,14 @@ use wisp_tmux::{
 };
 use wisp_ui::{SurfaceKind, SurfaceModel, UiIntent, render_surface, translate_key};
 use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
+
+const PREVIEW_REFRESH_DEBOUNCE: Duration = Duration::from_millis(400);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewMode {
+    Pane,
+    Details,
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -161,13 +175,19 @@ fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
 fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
     let session_items = derive_session_list(&state, Some("default"));
-    let preview_provider = SessionPreviewProvider {
+    let pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
+    let details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
     };
+    let tmux = CommandTmuxClient::new();
     let mut query = String::new();
     let mut selected = 0usize;
     let mut show_help = true;
     let mut preview_enabled = matches!(kind, SurfaceKind::Picker);
+    let mut preview_mode = PreviewMode::Pane;
+    let mut preview = None;
+    let mut preview_session_id = None;
+    let mut preview_refreshed_at: Option<Instant> = None;
     let mut surface_kind = kind;
 
     enable_raw_mode()?;
@@ -179,19 +199,49 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
         if selected >= filtered.len() {
             selected = filtered.len().saturating_sub(1);
         }
-        let preview = if preview_enabled {
-            filtered.get(selected).and_then(|item| {
-                preview_provider
-                    .generate(&PreviewRequest::SessionSummary {
-                        key: PreviewKey::Session(item.session_id.clone()),
-                        session_name: item.session_id.clone(),
-                    })
-                    .ok()
-                    .map(|content| content.body)
-            })
-        } else {
-            None
-        };
+        let selected_item = filtered.get(selected);
+        let should_refresh_preview = preview_enabled
+            && selected_item.is_some()
+            && match (
+                selected_item,
+                preview_session_id.as_deref(),
+                preview_refreshed_at,
+            ) {
+                (Some(item), Some(previous_session_id), Some(refreshed_at))
+                    if previous_session_id == item.session_id
+                        && preview_mode == PreviewMode::Pane =>
+                {
+                    refreshed_at.elapsed() >= PREVIEW_REFRESH_DEBOUNCE
+                }
+                (Some(item), Some(previous_session_id), _)
+                    if previous_session_id == item.session_id =>
+                {
+                    false
+                }
+                (Some(_), _, _) => true,
+                (None, _, _) => false,
+            };
+
+        if !preview_enabled {
+            preview = None;
+            preview_session_id = None;
+            preview_refreshed_at = None;
+        } else if should_refresh_preview && let Some(item) = selected_item {
+            preview = Some(generate_preview(
+                match preview_mode {
+                    PreviewMode::Pane => &pane_preview_provider as &dyn PreviewProvider,
+                    PreviewMode::Details => &details_preview_provider as &dyn PreviewProvider,
+                },
+                item,
+            ));
+            preview_session_id = Some(item.session_id.clone());
+            preview_refreshed_at = Some(Instant::now());
+        } else if selected_item.is_none() {
+            preview = None;
+            preview_session_id = None;
+            preview_refreshed_at = None;
+        }
+
         let model = SurfaceModel {
             title: match surface_kind {
                 SurfaceKind::Picker => "Wisp Picker".to_string(),
@@ -202,7 +252,7 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             items: filtered.clone(),
             selected,
             show_help,
-            preview,
+            preview: preview.clone(),
             kind: surface_kind,
         };
 
@@ -242,9 +292,16 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
                 UiIntent::TogglePreview => {
                     preview_enabled = !preview_enabled;
                 }
+                UiIntent::ToggleDetails => {
+                    preview_mode = match preview_mode {
+                        PreviewMode::Pane => PreviewMode::Details,
+                        PreviewMode::Details => PreviewMode::Pane,
+                    };
+                    preview_session_id = None;
+                    preview_refreshed_at = None;
+                }
                 UiIntent::ActivateSelected => {
                     if let Some(item) = filtered.get(selected) {
-                        let tmux = CommandTmuxClient::new();
                         tmux.switch_or_attach_session(&item.session_id)?;
                     }
                     break Ok(());
@@ -259,6 +316,16 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> Vec<String> {
+    provider
+        .generate(&PreviewRequest::SessionSummary {
+            key: PreviewKey::Session(item.session_id.clone()),
+            session_name: item.session_id.clone(),
+        })
+        .map(|content| content.body)
+        .unwrap_or_else(|error| vec![error.to_string()])
 }
 
 fn load_domain_state() -> Result<DomainState, Box<dyn Error>> {

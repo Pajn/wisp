@@ -6,6 +6,7 @@ use std::{
 
 use thiserror::Error;
 use wisp_core::{DomainState, PreviewContent, PreviewKey, PreviewRequest};
+use wisp_tmux::TmuxClient;
 
 pub trait PreviewProvider {
     fn can_preview(&self, request: &PreviewRequest) -> bool;
@@ -30,8 +31,24 @@ impl Default for FilesystemPreviewProvider {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SessionPreviewProvider {
+pub struct SessionDetailsPreviewProvider {
     pub state: DomainState,
+}
+
+#[derive(Debug)]
+pub struct ActivePanePreviewProvider<T> {
+    pub tmux: T,
+    pub max_lines: usize,
+}
+
+impl<T> ActivePanePreviewProvider<T> {
+    #[must_use]
+    pub fn new(tmux: T) -> Self {
+        Self {
+            tmux,
+            max_lines: 40,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +161,7 @@ impl FilesystemPreviewProvider {
     }
 }
 
-impl PreviewProvider for SessionPreviewProvider {
+impl PreviewProvider for SessionDetailsPreviewProvider {
     fn can_preview(&self, request: &PreviewRequest) -> bool {
         matches!(request, PreviewRequest::SessionSummary { .. })
     }
@@ -179,6 +196,35 @@ impl PreviewProvider for SessionPreviewProvider {
     }
 }
 
+impl<T> PreviewProvider for ActivePanePreviewProvider<T>
+where
+    T: TmuxClient,
+{
+    fn can_preview(&self, request: &PreviewRequest) -> bool {
+        matches!(request, PreviewRequest::SessionSummary { .. })
+    }
+
+    fn generate(&self, request: &PreviewRequest) -> Result<PreviewContent, PreviewError> {
+        let PreviewRequest::SessionSummary { session_name, .. } = request else {
+            return Err(PreviewError::Unsupported);
+        };
+
+        let captured =
+            self.tmux
+                .capture_pane(session_name)
+                .map_err(|source| PreviewError::Tmux {
+                    session_name: session_name.clone(),
+                    message: source.to_string(),
+                })?;
+
+        Ok(PreviewContent::from_text(
+            format!("Pane {session_name}"),
+            captured,
+            self.max_lines,
+        ))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PreviewError {
     #[error("preview source is unsupported")]
@@ -191,6 +237,11 @@ pub enum PreviewError {
     },
     #[error("session `{0}` was not found")]
     MissingSession(String),
+    #[error("failed to capture active pane for session `{session_name}`: {message}")]
+    Tmux {
+        session_name: String,
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -202,7 +253,10 @@ mod tests {
         SessionRecord, SessionSortKey, WindowRecord,
     };
 
-    use crate::{FilesystemPreviewProvider, PreviewCache, PreviewProvider, SessionPreviewProvider};
+    use crate::{
+        ActivePanePreviewProvider, FilesystemPreviewProvider, PreviewCache, PreviewProvider,
+        SessionDetailsPreviewProvider,
+    };
 
     #[test]
     fn preview_cache_evicts_oldest_entries() {
@@ -251,7 +305,7 @@ mod tests {
 
     #[test]
     fn session_preview_uses_domain_state() {
-        let provider = SessionPreviewProvider {
+        let provider = SessionDetailsPreviewProvider {
             state: DomainState {
                 sessions: BTreeMap::from([(
                     "alpha".to_string(),
@@ -297,5 +351,109 @@ mod tests {
             .expect("session preview");
 
         assert!(preview.body.iter().any(|line| line.contains("windows: 1")));
+    }
+
+    #[derive(Debug, Default)]
+    struct StubTmuxClient {
+        capture: String,
+    }
+
+    impl wisp_tmux::TmuxClient for StubTmuxClient {
+        fn capabilities(&self) -> Result<wisp_tmux::TmuxCapabilities, wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn current_context(&self) -> Result<wisp_tmux::TmuxContext, wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn list_sessions(&self) -> Result<Vec<wisp_tmux::TmuxSession>, wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn list_windows(&self) -> Result<Vec<wisp_tmux::TmuxWindow>, wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn capture_pane(&self, _target: &str) -> Result<String, wisp_tmux::TmuxError> {
+            Ok(self.capture.clone())
+        }
+
+        fn snapshot(
+            &self,
+            _query_windows: bool,
+        ) -> Result<wisp_tmux::TmuxSnapshot, wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn ensure_session(
+            &self,
+            _session_name: &str,
+            _directory: &std::path::Path,
+        ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn switch_or_attach_session(
+            &self,
+            _session_name: &str,
+        ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn create_or_switch_session(
+            &self,
+            _session_name: &str,
+            _directory: &std::path::Path,
+        ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn open_popup(
+            &self,
+            _command: &wisp_tmux::PopupCommand,
+            _options: &wisp_tmux::PopupOptions,
+        ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn open_sidebar_pane(
+            &self,
+            _spec: &wisp_tmux::SidebarPaneSpec,
+        ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn close_sidebar_pane(&self, _target: Option<&str>) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn update_status_line(
+            &self,
+            _line: usize,
+            _content: &str,
+        ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+    }
+
+    #[test]
+    fn active_pane_preview_uses_tmux_capture() {
+        let provider = ActivePanePreviewProvider {
+            tmux: StubTmuxClient {
+                capture: "one\ntwo\nthree".to_string(),
+            },
+            max_lines: 2,
+        };
+
+        let preview = provider
+            .generate(&PreviewRequest::SessionSummary {
+                key: PreviewKey::Session("alpha".to_string()),
+                session_name: "alpha".to_string(),
+            })
+            .expect("active pane preview");
+
+        assert_eq!(preview.body, vec!["one".to_string(), "two".to_string()]);
+        assert!(preview.truncated);
     }
 }

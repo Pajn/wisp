@@ -35,6 +35,7 @@ pub enum UiIntent {
     Backspace,
     ToggleCompactSidebar,
     TogglePreview,
+    ToggleDetails,
     Close,
 }
 
@@ -58,6 +59,7 @@ pub fn translate_key(key: KeyEvent) -> Option<UiIntent> {
             Some(UiIntent::Close)
         }
         KeyCode::Char('p') => Some(UiIntent::TogglePreview),
+        KeyCode::Char('d') => Some(UiIntent::ToggleDetails),
         KeyCode::Char('m') => Some(UiIntent::ToggleCompactSidebar),
         KeyCode::Backspace => Some(UiIntent::Backspace),
         KeyCode::Char(character)
@@ -189,7 +191,7 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
 
 fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     let text = if model.show_help {
-        "j/k move  enter open  p preview  m compact  q close"
+        "j/k move  enter open  p preview  d details  m compact  q close"
     } else {
         "q close"
     };
@@ -279,6 +281,10 @@ mod tests {
         assert_eq!(
             translate_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
             Some(UiIntent::SelectNext)
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+            Some(UiIntent::ToggleDetails)
         );
         assert_eq!(
             translate_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
