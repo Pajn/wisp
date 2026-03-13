@@ -22,6 +22,7 @@ pub struct DirectoryEntry {
 
 pub trait ZoxideProvider {
     fn load_entries(&self, max_entries: usize) -> Result<Vec<DirectoryEntry>, ZoxideError>;
+    fn query_directory(&self, query: &str) -> Result<Option<DirectoryEntry>, ZoxideError>;
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +71,22 @@ impl CommandZoxideProvider {
             ProviderMode::Query | ProviderMode::FrecencyList => vec!["query", "-l", "-s"],
         }
     }
+
+    fn query_args(&self, query: &str) -> Vec<String> {
+        let mut args = self
+            .args()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        args.extend(query.split_whitespace().map(str::to_string));
+        args
+    }
+
+    fn command_for_args(&self, args: &[String]) -> Vec<String> {
+        std::iter::once(self.binary.display().to_string())
+            .chain(args.iter().cloned())
+            .collect()
+    }
 }
 
 impl ZoxideProvider for CommandZoxideProvider {
@@ -114,6 +131,61 @@ impl ZoxideProvider for CommandZoxideProvider {
             .into_iter()
             .take(max_entries)
             .collect())
+    }
+
+    fn query_directory(&self, query: &str) -> Result<Option<DirectoryEntry>, ZoxideError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(None);
+        }
+
+        let args = self.query_args(query);
+        let output = Command::new(&self.binary)
+            .args(&args)
+            .output()
+            .map_err(|source| {
+                if source.kind() == std::io::ErrorKind::NotFound {
+                    ZoxideError::Unavailable {
+                        message: source.to_string(),
+                    }
+                } else {
+                    ZoxideError::CommandFailed {
+                        command: self.command_for_args(&args),
+                        stderr: source.to_string(),
+                        status: None,
+                    }
+                }
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                return Ok(None);
+            }
+
+            return Err(ZoxideError::CommandFailed {
+                command: self.command_for_args(&args),
+                stderr,
+                status: output.status.code(),
+            });
+        }
+
+        let parsed = parse_entries(&String::from_utf8_lossy(&output.stdout))?;
+        for entry in parsed {
+            let path = normalize_path(&entry.path);
+            let exists = path.exists();
+            if !self.include_missing && !exists {
+                continue;
+            }
+
+            return Ok(Some(DirectoryEntry {
+                path,
+                score: entry.score,
+                exists,
+            }));
+        }
+
+        Ok(None)
     }
 }
 
@@ -233,7 +305,9 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 mod tests {
     use std::fs;
 
-    use super::{DirectoryEntry, normalize_entries, normalize_path, parse_entries};
+    use super::{
+        CommandZoxideProvider, DirectoryEntry, normalize_entries, normalize_path, parse_entries,
+    };
 
     #[test]
     fn parses_scored_zoxide_output() {
@@ -284,5 +358,15 @@ mod tests {
         assert_eq!(entries[0].score, Some(10.0));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn builds_query_arguments_from_whitespace_separated_terms() {
+        let provider = CommandZoxideProvider::new();
+
+        assert_eq!(
+            provider.query_args("  dev shell  "),
+            vec!["query", "-l", "-s", "dev", "shell"]
+        );
     }
 }

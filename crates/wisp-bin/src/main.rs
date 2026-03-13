@@ -366,6 +366,46 @@ fn selected_index_for_session(
         .position(|item| item.session_id == session_id)
 }
 
+fn create_session_from_query(
+    tmux: &impl TmuxClient,
+    zoxide: &impl ZoxideProvider,
+    query: &str,
+    fallback_directory: &Path,
+) -> Result<bool, Box<dyn Error>> {
+    let session_name = query.trim();
+    if session_name.is_empty() {
+        return Ok(false);
+    }
+
+    let directory = zoxide
+        .query_directory(session_name)?
+        .map(|entry| entry.path)
+        .unwrap_or_else(|| fallback_directory.to_path_buf());
+    tmux.create_or_switch_session(session_name, &directory)?;
+    Ok(true)
+}
+
+fn activate_filter_selection(
+    tmux: &impl TmuxClient,
+    zoxide: &impl ZoxideProvider,
+    filtered: &[SessionListItem],
+    selected: usize,
+    query: &str,
+    fallback_directory: &Path,
+    force_create_from_query: bool,
+) -> Result<bool, Box<dyn Error>> {
+    if force_create_from_query || filtered.get(selected).is_none() {
+        return create_session_from_query(tmux, zoxide, query, fallback_directory);
+    }
+
+    if let Some(item) = filtered.get(selected) {
+        tmux.switch_or_attach_session(&item.session_id)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 fn open_popup_or_run_inline(
     kind: SurfaceKind,
     config: &ResolvedConfig,
@@ -428,6 +468,8 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         state: state.clone(),
     };
     let tmux = CommandTmuxClient::new();
+    let zoxide = CommandZoxideProvider::new();
+    let current_directory = env::current_dir()?;
     let sidebar_command = sidebar_surface_command(env::current_exe()?);
     let mut sidebar_runtime = sidebar_runtime(&tmux, kind)?;
     let saved_sidebar_state = match &sidebar_runtime {
@@ -685,20 +727,29 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         preview_refreshed_at = None;
                     }
                 }
-                UiIntent::ActivateSelected => match &input_mode {
+                activate_intent @ (UiIntent::ActivateSelected
+                | UiIntent::CreateSessionFromQuery) => match &input_mode {
                     InputMode::Filter => {
-                        if let Some(item) = filtered.get(selected) {
-                            if let Some(runtime) = &sidebar_runtime {
-                                persist_sidebar_ui_state(
-                                    runtime,
-                                    &session_items,
-                                    &query,
-                                    surface_kind,
-                                    session_sort,
-                                    selected,
-                                )?;
-                            }
-                            tmux.switch_or_attach_session(&item.session_id)?;
+                        if let Some(runtime) = &sidebar_runtime {
+                            persist_sidebar_ui_state(
+                                runtime,
+                                &session_items,
+                                &query,
+                                surface_kind,
+                                session_sort,
+                                selected,
+                            )?;
+                        }
+                        let activated = activate_filter_selection(
+                            &tmux,
+                            &zoxide,
+                            &filtered,
+                            selected,
+                            &query,
+                            &current_directory,
+                            matches!(activate_intent, UiIntent::CreateSessionFromQuery),
+                        )?;
+                        if activated {
                             if let Some(runtime) = &sidebar_runtime {
                                 reconcile_sidebar_for_current_context(
                                     &tmux,
@@ -706,8 +757,8 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                                     runtime.pane_id.as_deref(),
                                 )?;
                             }
+                            break Ok(());
                         }
-                        break Ok(());
                     }
                     InputMode::Rename {
                         session_id,
@@ -1334,13 +1385,15 @@ mod tests {
         PopupCommand, PopupOptions, SidebarPaneSpec, TmuxCapabilities, TmuxClient, TmuxContext,
         TmuxError, TmuxPane, TmuxSession, TmuxSnapshot, TmuxVersion, TmuxWindow,
     };
+    use wisp_zoxide::{DirectoryEntry, ZoxideError, ZoxideProvider};
 
     use crate::{
         SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, STATUSLINE_REFRESH_COMMAND,
         STATUSLINE_REFRESH_HOOKS, SidebarRuntime, StatuslineCommand, SurfaceKind,
-        apply_session_sort, clear_sidebar_ui_state, current_session_id,
-        disable_sidebar_for_session, install_statusline_refresh_hooks, load_sidebar_ui_state,
-        parse_statusline_command, persist_sidebar_ui_state, reconcile_sidebar_for_current_context,
+        activate_filter_selection, apply_session_sort, clear_sidebar_ui_state,
+        create_session_from_query, current_session_id, disable_sidebar_for_session,
+        install_statusline_refresh_hooks, load_sidebar_ui_state, parse_statusline_command,
+        persist_sidebar_ui_state, reconcile_sidebar_for_current_context,
         selected_index_for_session, sidebar_requires_handoff, sidebar_state_path,
         sidebar_surface_command, statusline_command_expression, statusline_mode,
         uninstall_statusline_refresh_hooks,
@@ -1351,6 +1404,8 @@ mod tests {
         context: TmuxContext,
         windows: Vec<TmuxWindow>,
         panes: Vec<TmuxPane>,
+        created_sessions: RefCell<Vec<(String, PathBuf)>>,
+        switched_sessions: RefCell<Vec<String>>,
         opened_targets: RefCell<Vec<String>>,
         closed_panes: RefCell<Vec<String>>,
         selected_panes: RefCell<Vec<String>>,
@@ -1437,8 +1492,11 @@ mod tests {
             unreachable!("not used in test");
         }
 
-        fn switch_or_attach_session(&self, _session_name: &str) -> Result<(), TmuxError> {
-            unreachable!("not used in test");
+        fn switch_or_attach_session(&self, session_name: &str) -> Result<(), TmuxError> {
+            self.switched_sessions
+                .borrow_mut()
+                .push(session_name.to_string());
+            Ok(())
         }
 
         fn rename_session(&self, _session_name: &str, _new_name: &str) -> Result<(), TmuxError> {
@@ -1451,10 +1509,13 @@ mod tests {
 
         fn create_or_switch_session(
             &self,
-            _session_name: &str,
-            _directory: &Path,
+            session_name: &str,
+            directory: &Path,
         ) -> Result<(), TmuxError> {
-            unreachable!("not used in test");
+            self.created_sessions
+                .borrow_mut()
+                .push((session_name.to_string(), directory.to_path_buf()));
+            Ok(())
         }
 
         fn open_popup(
@@ -1522,6 +1583,40 @@ mod tests {
         fn refresh_client_status(&self) -> Result<(), TmuxError> {
             self.refreshed_status.set(true);
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct StubZoxideProvider {
+        entries: RefCell<Vec<(String, DirectoryEntry)>>,
+    }
+
+    impl StubZoxideProvider {
+        fn with_match(self, query: &str, directory: &Path) -> Self {
+            self.entries.borrow_mut().push((
+                query.to_string(),
+                DirectoryEntry {
+                    path: directory.to_path_buf(),
+                    score: Some(42.0),
+                    exists: true,
+                },
+            ));
+            self
+        }
+    }
+
+    impl ZoxideProvider for StubZoxideProvider {
+        fn load_entries(&self, _max_entries: usize) -> Result<Vec<DirectoryEntry>, ZoxideError> {
+            unreachable!("not used in test");
+        }
+
+        fn query_directory(&self, query: &str) -> Result<Option<DirectoryEntry>, ZoxideError> {
+            Ok(self
+                .entries
+                .borrow()
+                .iter()
+                .find(|(candidate_query, _)| candidate_query == query)
+                .map(|(_, entry)| entry.clone()))
         }
     }
 
@@ -1829,6 +1924,90 @@ mod tests {
                 .collect::<Vec<_>>(),
             STATUSLINE_REFRESH_HOOKS.to_vec()
         );
+    }
+
+    #[test]
+    fn creates_session_from_query_using_zoxide_match() {
+        let tmux = StubTmuxClient::default();
+        let zoxide =
+            StubZoxideProvider::default().with_match("demo app", Path::new("/tmp/demo-app"));
+
+        assert!(
+            create_session_from_query(&tmux, &zoxide, "  demo app  ", Path::new("/fallback"))
+                .expect("query create should succeed")
+        );
+        assert_eq!(
+            tmux.created_sessions.borrow().as_slice(),
+            [("demo app".to_string(), PathBuf::from("/tmp/demo-app"))]
+        );
+    }
+
+    #[test]
+    fn create_session_from_query_falls_back_when_zoxide_has_no_match() {
+        let tmux = StubTmuxClient::default();
+        let zoxide = StubZoxideProvider::default();
+
+        assert!(
+            create_session_from_query(&tmux, &zoxide, "scratch", Path::new("/fallback"))
+                .expect("query create should succeed")
+        );
+        assert_eq!(
+            tmux.created_sessions.borrow().as_slice(),
+            [("scratch".to_string(), PathBuf::from("/fallback"))]
+        );
+    }
+
+    #[test]
+    fn activate_filter_selection_switches_or_creates_as_needed() {
+        let tmux = StubTmuxClient::default();
+        let zoxide = StubZoxideProvider::default().with_match("new session", Path::new("/tmp/new"));
+        let filtered = vec![session_item("alpha")];
+
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &filtered,
+                0,
+                "ignored",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("existing selection should activate")
+        );
+        assert_eq!(tmux.switched_sessions.borrow().as_slice(), ["alpha"]);
+
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &filtered,
+                0,
+                "new session",
+                Path::new("/fallback"),
+                true,
+            )
+            .expect("forced create should succeed")
+        );
+        assert_eq!(
+            tmux.created_sessions.borrow().as_slice(),
+            [("new session".to_string(), PathBuf::from("/tmp/new"))]
+        );
+
+        let no_matches = Vec::new();
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &no_matches,
+                0,
+                "new session",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("empty filter should create from query")
+        );
+        assert_eq!(tmux.created_sessions.borrow().len(), 2);
     }
 
     #[test]

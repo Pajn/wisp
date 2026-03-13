@@ -50,3 +50,40 @@ fn loads_entries_from_a_fake_zoxide_binary() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn queries_the_best_matching_directory() {
+    let root = unique_root();
+    let bin_dir = root.join("bin");
+    let workspace = root.join("workspace");
+    let nested = workspace.join("shell");
+    fs::create_dir_all(&bin_dir).expect("bin directory");
+    fs::create_dir_all(&nested).expect("nested workspace directory");
+
+    let script = bin_dir.join("zoxide");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"query\" ] && [ \"$4\" = \"dev\" ] && [ \"$5\" = \"shell\" ]; then\n  printf '90.0 {nested}\\n12.0 {workspace}\\n'\nelse\n  exit 1\nfi\n",
+            nested = nested.display(),
+            workspace = workspace.display(),
+        ),
+    )
+    .expect("fake zoxide script");
+    let mut permissions = fs::metadata(&script)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).expect("executable fake zoxide");
+
+    let entry = CommandZoxideProvider::new()
+        .with_binary(&script)
+        .query_directory("dev shell")
+        .expect("zoxide query should succeed")
+        .expect("zoxide query should find a match");
+
+    assert_eq!(entry.score, Some(90.0));
+    assert_eq!(entry.path, nested);
+
+    let _ = fs::remove_dir_all(root);
+}

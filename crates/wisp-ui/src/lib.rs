@@ -33,6 +33,7 @@ pub enum UiIntent {
     SelectNext,
     SelectPrev,
     ActivateSelected,
+    CreateSessionFromQuery,
     RenameSession,
     ToggleSort,
     CloseSession,
@@ -92,6 +93,9 @@ pub fn translate_key(key: KeyEvent, bindings: &KeyBindings) -> Option<UiIntent> 
         }
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiIntent::SelectPrev)
+        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(UiIntent::CreateSessionFromQuery)
         }
         KeyCode::Enter => Some(bindings.enter.clone()),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -347,7 +351,7 @@ fn rounded_block(title: &str) -> Block<'_> {
 
 fn bindings_help_text(bindings: &KeyBindings) -> String {
     format!(
-        "up/down or ^j/^k move  enter {}  ^r {}  ^s {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
+        "up/down or ^j/^k move  enter {}  S-enter create  ^r {}  ^s {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
         intent_label(&bindings.enter),
         intent_label(&bindings.ctrl_r),
         intent_label(&bindings.ctrl_s),
@@ -371,6 +375,7 @@ fn compact_bindings_help_text(bindings: &KeyBindings) -> String {
 fn intent_label(intent: &UiIntent) -> &'static str {
     match intent {
         UiIntent::ActivateSelected => "open",
+        UiIntent::CreateSessionFromQuery => "create",
         UiIntent::RenameSession => "rename",
         UiIntent::ToggleSort => "sort",
         UiIntent::CloseSession => "close session",
@@ -743,6 +748,13 @@ mod tests {
                 &KeyBindings::default(),
             ),
             Some(UiIntent::SelectNext)
+        );
+        assert_eq!(
+            translate_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                &KeyBindings::default(),
+            ),
+            Some(UiIntent::CreateSessionFromQuery)
         );
         assert_eq!(
             translate_key(
