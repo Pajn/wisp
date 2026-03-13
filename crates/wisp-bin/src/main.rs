@@ -28,10 +28,10 @@ use wisp_core::{
 };
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
 use wisp_preview::{ActivePanePreviewProvider, PreviewProvider, SessionDetailsPreviewProvider};
-use wisp_status::{StatusFormatOptions, StatusRenderState};
+use wisp_status::{StatusFormatOptions, StatusRenderMode, render_status_line};
 use wisp_tmux::{
     CommandTmuxClient, PollingTmuxBackend, PopupCommand, PopupOptions, PopupSpec, SidebarPaneSpec,
-    SidebarSide, TmuxBackend, TmuxClient, TmuxError,
+    SidebarSide, TmuxBackend, TmuxCapabilities, TmuxClient, TmuxError, format_popup_command,
 };
 use wisp_ui::{KeyBindings, SurfaceKind, SurfaceModel, UiIntent, render_surface, translate_key};
 use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
@@ -82,6 +82,13 @@ struct SidebarRuntime {
     pane_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatuslineCommand {
+    Install { line: Option<usize> },
+    Render { force: Option<StatusRenderMode> },
+    Uninstall { line: Option<usize> },
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -93,7 +100,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let command = env::args().nth(1).unwrap_or_else(|| "popup".to_string());
+    let args = env::args().collect::<Vec<_>>();
+    let command = args.get(1).cloned().unwrap_or_else(|| "popup".to_string());
     let config = load_config(&LoadOptions {
         cli_overrides: CliOverrides::default(),
         ..LoadOptions::default()
@@ -108,7 +116,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             doctor();
             Ok(())
         }
-        "status-line" => update_status_line(),
+        "status-line" => run_statusline_command(&config, StatuslineCommand::Install { line: None }),
+        "statusline" => {
+            let status_command = parse_statusline_command(&args[2..])?;
+            run_statusline_command(&config, status_command)
+        }
         "fullscreen" => run_surface(SurfaceKind::Picker, &config),
         "popup" => open_popup_or_run_inline(SurfaceKind::Picker, &config),
         "sidebar-popup" => open_sidebar_popup_or_run_inline(&config),
@@ -135,8 +147,12 @@ fn doctor() {
     match tmux.capabilities() {
         Ok(capabilities) => {
             println!(
-                "tmux: {}.{} (popup: {})",
-                capabilities.version.major, capabilities.version.minor, capabilities.supports_popup
+                "tmux: {}.{} (popup: {}, status clicks: {}, mouse: {})",
+                capabilities.version.major,
+                capabilities.version.minor,
+                capabilities.supports_popup,
+                capabilities.supports_status_mouse_ranges,
+                capabilities.mouse_enabled
             );
         }
         Err(error) => println!("tmux: unavailable ({error})"),
@@ -151,16 +167,149 @@ fn doctor() {
     println!("event strategy: {:?}", backend.event_strategy());
 }
 
-fn update_status_line() -> Result<(), Box<dyn Error>> {
-    let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
+fn parse_statusline_command(args: &[String]) -> Result<StatuslineCommand, Box<dyn Error>> {
+    let mut positionals = Vec::new();
+    let mut force = None;
+    let mut line = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--force-passive" => force = Some(StatusRenderMode::Passive),
+            "--force-clickable" => force = Some(StatusRenderMode::Clickable),
+            "--line" => {
+                let raw = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --line".to_string())?;
+                line = Some(raw.parse::<usize>()?);
+                index += 1;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unsupported statusline flag `{value}`").into());
+            }
+            value => positionals.push(value.to_string()),
+        }
+        index += 1;
+    }
+
+    let subcommand = positionals.first().map(String::as_str).unwrap_or("install");
+    match subcommand {
+        "install" => {
+            if force.is_some() {
+                Err("install does not accept render mode flags".into())
+            } else {
+                Ok(StatuslineCommand::Install { line })
+            }
+        }
+        "render" => {
+            if line.is_some() {
+                Err("render does not accept --line".into())
+            } else {
+                Ok(StatuslineCommand::Render { force })
+            }
+        }
+        "uninstall" => {
+            if force.is_some() {
+                Err("uninstall does not accept render mode flags".into())
+            } else {
+                Ok(StatuslineCommand::Uninstall { line })
+            }
+        }
+        other => Err(format!("unsupported statusline subcommand `{other}`").into()),
+    }
+}
+
+fn run_statusline_command(
+    config: &ResolvedConfig,
+    command: StatuslineCommand,
+) -> Result<(), Box<dyn Error>> {
+    match command {
+        StatuslineCommand::Install { line } => install_statusline(config, line),
+        StatuslineCommand::Render { force } => render_statusline(config, force),
+        StatuslineCommand::Uninstall { line } => uninstall_statusline(config, line),
+    }
+}
+
+fn render_statusline(
+    config: &ResolvedConfig,
+    force: Option<StatusRenderMode>,
+) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
     let items = derive_status_items(&state, Some("default"));
-    let mut render_state = StatusRenderState::default();
-    if let Some(line) = render_state.next_update(&items, &StatusFormatOptions::default()) {
-        backend.update_status_line(2, &line)?;
-        println!("{line}");
-    }
+    let tmux = CommandTmuxClient::new();
+    let capabilities = tmux.capabilities()?;
+    let rendered = render_status_line(
+        &items,
+        &status_format_options(config),
+        force.unwrap_or_else(|| statusline_mode(config, &capabilities)),
+    );
+    println!("{}", rendered.text);
     Ok(())
+}
+
+fn install_statusline(
+    config: &ResolvedConfig,
+    line_override: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let tmux = CommandTmuxClient::new();
+    let capabilities = tmux.capabilities()?;
+    let line = line_override.unwrap_or(config.status.line);
+    if line > 1 && !capabilities.supports_multi_status_lines {
+        return Err(format!(
+            "tmux {}.{} does not support multi-line status rows",
+            capabilities.version.major, capabilities.version.minor
+        )
+        .into());
+    }
+
+    let current_lines = tmux.status_line_count()?;
+    if current_lines < line {
+        tmux.set_status_line_count(line)?;
+    }
+
+    let content = statusline_command_expression(env::current_exe()?);
+    tmux.update_status_line(line, &content)?;
+    println!("Installed Wisp statusline on row {line}.");
+    Ok(())
+}
+
+fn uninstall_statusline(
+    config: &ResolvedConfig,
+    line_override: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let tmux = CommandTmuxClient::new();
+    let line = line_override.unwrap_or(config.status.line);
+    tmux.clear_status_line(line)?;
+    println!("Removed Wisp statusline from row {line}.");
+    Ok(())
+}
+
+fn status_format_options(config: &ResolvedConfig) -> StatusFormatOptions {
+    StatusFormatOptions {
+        prefix: "Wisp".to_string(),
+        max_sessions: config.status.max_sessions,
+        show_previous: config.status.show_previous,
+        show_counts: false,
+    }
+}
+
+fn statusline_mode(config: &ResolvedConfig, capabilities: &TmuxCapabilities) -> StatusRenderMode {
+    if config.status.interactive
+        && capabilities.supports_status_mouse_ranges
+        && capabilities.mouse_enabled
+    {
+        StatusRenderMode::Clickable
+    } else {
+        StatusRenderMode::Passive
+    }
+}
+
+fn statusline_command_expression(program: PathBuf) -> String {
+    let command = PopupCommand {
+        program,
+        args: vec!["statusline".to_string(), "render".to_string()],
+    };
+    format!("#({})", format_popup_command(&command))
 }
 
 fn open_popup_or_run_inline(
@@ -1055,16 +1204,19 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use wisp_config::ResolvedConfig;
+    use wisp_status::StatusRenderMode;
     use wisp_tmux::{
         PopupCommand, PopupOptions, SidebarPaneSpec, TmuxCapabilities, TmuxClient, TmuxContext,
         TmuxError, TmuxPane, TmuxSession, TmuxSnapshot, TmuxVersion, TmuxWindow,
     };
 
     use crate::{
-        SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, SidebarRuntime, SurfaceKind,
+        SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, SidebarRuntime, StatuslineCommand, SurfaceKind,
         clear_sidebar_ui_state, disable_sidebar_for_session, load_sidebar_ui_state,
-        persist_sidebar_ui_state, reconcile_sidebar_for_current_context, sidebar_requires_handoff,
-        sidebar_surface_command,
+        parse_statusline_command, persist_sidebar_ui_state, reconcile_sidebar_for_current_context,
+        sidebar_requires_handoff, sidebar_surface_command, statusline_command_expression,
+        statusline_mode,
     };
 
     #[derive(Default)]
@@ -1104,6 +1256,9 @@ mod tests {
                     patch: None,
                 },
                 supports_popup: true,
+                supports_multi_status_lines: true,
+                supports_status_mouse_ranges: true,
+                mouse_enabled: true,
             })
         }
 
@@ -1204,6 +1359,18 @@ mod tests {
                 .borrow_mut()
                 .push((target.to_string(), width));
             Ok(())
+        }
+
+        fn status_line_count(&self) -> Result<usize, TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn set_status_line_count(&self, _count: usize) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn clear_status_line(&self, _line: usize) -> Result<(), TmuxError> {
+            unreachable!("not used in test");
         }
 
         fn update_status_line(&self, _line: usize, _content: &str) -> Result<(), TmuxError> {
@@ -1382,6 +1549,75 @@ mod tests {
             )
             .expect("handoff should evaluate")
         );
+    }
+
+    #[test]
+    fn parses_statusline_subcommands_and_flags() {
+        assert_eq!(
+            parse_statusline_command(&[]).expect("default subcommand"),
+            StatuslineCommand::Install { line: None }
+        );
+        assert_eq!(
+            parse_statusline_command(&["render".to_string(), "--force-clickable".to_string()])
+                .expect("render flags"),
+            StatuslineCommand::Render {
+                force: Some(StatusRenderMode::Clickable),
+            }
+        );
+        assert_eq!(
+            parse_statusline_command(&[
+                "uninstall".to_string(),
+                "--line".to_string(),
+                "3".to_string()
+            ])
+            .expect("uninstall line"),
+            StatuslineCommand::Uninstall { line: Some(3) }
+        );
+    }
+
+    #[test]
+    fn statusline_mode_requires_click_support_and_mouse() {
+        let config = ResolvedConfig::default();
+        assert_eq!(
+            statusline_mode(
+                &config,
+                &TmuxCapabilities {
+                    version: TmuxVersion {
+                        major: 3,
+                        minor: 4,
+                        patch: None,
+                    },
+                    supports_popup: true,
+                    supports_multi_status_lines: true,
+                    supports_status_mouse_ranges: true,
+                    mouse_enabled: true,
+                }
+            ),
+            StatusRenderMode::Clickable
+        );
+        assert_eq!(
+            statusline_mode(
+                &config,
+                &TmuxCapabilities {
+                    version: TmuxVersion {
+                        major: 3,
+                        minor: 4,
+                        patch: None,
+                    },
+                    supports_popup: true,
+                    supports_multi_status_lines: true,
+                    supports_status_mouse_ranges: true,
+                    mouse_enabled: false,
+                }
+            ),
+            StatusRenderMode::Passive
+        );
+    }
+
+    #[test]
+    fn statusline_install_uses_render_command_expression() {
+        let command = statusline_command_expression(PathBuf::from("/tmp/wisp"));
+        assert_eq!(command, "#('/tmp/wisp' 'statusline' 'render')");
     }
 
     fn session_item(session_id: &str) -> wisp_core::SessionListItem {

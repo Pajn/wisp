@@ -29,3 +29,15 @@ fn print_config_command_dumps_effective_config() {
     assert!(stdout.contains("ResolvedConfig"));
     assert!(stdout.contains("preview_width"));
 }
+
+#[test]
+fn statusline_render_command_prints_status_output() {
+    let output = Command::new(bin())
+        .args(["statusline", "render"])
+        .output()
+        .expect("run statusline render");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Wisp"));
+}

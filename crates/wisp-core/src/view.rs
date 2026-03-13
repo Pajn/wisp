@@ -36,7 +36,8 @@ pub enum GitBranchSync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSessionItem {
-    pub label: String,
+    pub session_id: String,
+    pub session_name: String,
     pub is_current: bool,
     pub is_previous: bool,
     pub badge: AttentionBadge,
@@ -124,15 +125,26 @@ pub fn derive_session_list(state: &DomainState, client_id: Option<&str>) -> Vec<
 
 #[must_use]
 pub fn derive_status_items(state: &DomainState, client_id: Option<&str>) -> Vec<StatusSessionItem> {
-    derive_session_list(state, client_id)
-        .into_iter()
-        .map(|item| StatusSessionItem {
-            label: item.label,
-            is_current: item.is_current,
-            is_previous: item.is_previous,
-            badge: item.attention,
+    let current = state.current_session_id(client_id);
+    let previous = state.previous_session_id(client_id);
+
+    let mut items = state
+        .sessions
+        .iter()
+        .map(|(session_id, session)| StatusSessionItem {
+            session_id: session
+                .tmux_id
+                .clone()
+                .unwrap_or_else(|| session_id.clone()),
+            session_name: session.name.clone(),
+            is_current: current == Some(session_id),
+            is_previous: previous == Some(session_id),
+            badge: session.aggregate_alerts.highest_priority,
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| left.session_name.cmp(&right.session_name));
+    items
 }
 
 fn directory_candidate(entry: &DirectoryRecord, home: Option<&Path>) -> Candidate {
@@ -160,6 +172,7 @@ mod tests {
                 "alpha".to_string(),
                 SessionRecord {
                     id: "alpha".to_string(),
+                    tmux_id: Some("$1".to_string()),
                     name: "alpha".to_string(),
                     attached: true,
                     windows: BTreeMap::from([(
@@ -241,7 +254,47 @@ mod tests {
     fn derives_status_items_from_session_projection() {
         let items = derive_status_items(&seeded_state(), Some("client-1"));
 
-        assert_eq!(items[0].label, "alpha");
+        assert_eq!(items[0].session_id, "$1");
+        assert_eq!(items[0].session_name, "alpha");
         assert!(items[0].is_current);
+    }
+
+    #[test]
+    fn derives_status_items_in_alphabetical_order() {
+        let mut state = seeded_state();
+        state.sessions.insert(
+            "beta".to_string(),
+            SessionRecord {
+                id: "beta".to_string(),
+                tmux_id: Some("$2".to_string()),
+                name: "beta".to_string(),
+                attached: false,
+                windows: BTreeMap::new(),
+                aggregate_alerts: AlertAggregate::default(),
+                has_unseen: false,
+                sort_key: SessionSortKey::default(),
+            },
+        );
+        state.sessions.insert(
+            "aardvark".to_string(),
+            SessionRecord {
+                id: "aardvark".to_string(),
+                tmux_id: Some("$3".to_string()),
+                name: "aardvark".to_string(),
+                attached: false,
+                windows: BTreeMap::new(),
+                aggregate_alerts: AlertAggregate::default(),
+                has_unseen: false,
+                sort_key: SessionSortKey::default(),
+            },
+        );
+
+        let items = derive_status_items(&state, Some("client-1"));
+        let names = items
+            .into_iter()
+            .map(|item| item.session_name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["aardvark", "alpha", "beta"]);
     }
 }

@@ -5,7 +5,8 @@ use wisp_status::{StatusFormatOptions, format_status_line};
 fn seeded_items() -> Vec<StatusSessionItem> {
     (0..50)
         .map(|index| StatusSessionItem {
-            label: format!("session-{index}"),
+            session_id: format!("${index}"),
+            session_name: format!("session-{index}"),
             is_current: index == 0,
             is_previous: index == 1,
             badge: if index % 11 == 0 {

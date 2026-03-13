@@ -14,6 +14,7 @@ fn seeded_state() -> DomainState {
                 name.clone(),
                 SessionRecord {
                     id: name.clone(),
+                    tmux_id: None,
                     name,
                     attached: index % 3 == 0,
                     windows: BTreeMap::from([(

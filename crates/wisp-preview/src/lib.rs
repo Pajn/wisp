@@ -311,6 +311,7 @@ mod tests {
                     "alpha".to_string(),
                     SessionRecord {
                         id: "alpha".to_string(),
+                        tmux_id: None,
                         name: "alpha".to_string(),
                         attached: true,
                         windows: BTreeMap::from([(
@@ -456,6 +457,18 @@ mod tests {
             _target: &str,
             _width: u16,
         ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn status_line_count(&self) -> Result<usize, wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn set_status_line_count(&self, _count: usize) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn clear_status_line(&self, _line: usize) -> Result<(), wisp_tmux::TmuxError> {
             unreachable!("not used in test");
         }
 

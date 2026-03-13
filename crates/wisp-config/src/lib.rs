@@ -13,6 +13,7 @@ pub struct ResolvedConfig {
     pub ui: UiConfig,
     pub fuzzy: FuzzyConfig,
     pub tmux: TmuxConfig,
+    pub status: StatusConfig,
     pub zoxide: ZoxideConfig,
     pub preview: PreviewConfig,
     pub actions: ActionsConfig,
@@ -38,6 +39,12 @@ impl Default for ResolvedConfig {
                 prefer_popup: true,
                 popup_width: Dimension::Percent(80),
                 popup_height: Dimension::Percent(85),
+            },
+            status: StatusConfig {
+                line: 2,
+                interactive: true,
+                max_sessions: None,
+                show_previous: true,
             },
             zoxide: ZoxideConfig {
                 enabled: true,
@@ -93,6 +100,14 @@ pub struct TmuxConfig {
     pub prefer_popup: bool,
     pub popup_width: Dimension,
     pub popup_height: Dimension,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusConfig {
+    pub line: usize,
+    pub interactive: bool,
+    pub max_sessions: Option<usize>,
+    pub show_previous: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +484,7 @@ struct PartialConfig {
     ui: PartialUiConfig,
     fuzzy: PartialFuzzyConfig,
     tmux: PartialTmuxConfig,
+    status: PartialStatusConfig,
     zoxide: PartialZoxideConfig,
     preview: PartialPreviewConfig,
     actions: PartialActionsConfig,
@@ -480,6 +496,7 @@ impl PartialConfig {
         self.ui.merge(other.ui);
         self.fuzzy.merge(other.fuzzy);
         self.tmux.merge(other.tmux);
+        self.status.merge(other.status);
         self.zoxide.merge(other.zoxide);
         self.preview.merge(other.preview);
         self.actions.merge(other.actions);
@@ -609,6 +626,17 @@ impl PartialConfig {
             }
         }
 
+        if let Some(line) = self.status.line {
+            config.status.line = line;
+        }
+        if let Some(interactive) = self.status.interactive {
+            config.status.interactive = interactive;
+        }
+        config.status.max_sessions = self.status.max_sessions;
+        if let Some(show_previous) = self.status.show_previous {
+            config.status.show_previous = show_previous;
+        }
+
         if let Some(enabled) = self.zoxide.enabled {
             config.zoxide.enabled = enabled;
         }
@@ -729,6 +757,24 @@ impl PartialTmuxConfig {
         merge_option(&mut self.prefer_popup, other.prefer_popup);
         merge_option(&mut self.popup_width, other.popup_width);
         merge_option(&mut self.popup_height, other.popup_height);
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct PartialStatusConfig {
+    line: Option<usize>,
+    interactive: Option<bool>,
+    max_sessions: Option<usize>,
+    show_previous: Option<bool>,
+}
+
+impl PartialStatusConfig {
+    fn merge(&mut self, other: Self) {
+        merge_option(&mut self.line, other.line);
+        merge_option(&mut self.interactive, other.interactive);
+        merge_option(&mut self.max_sessions, other.max_sessions);
+        merge_option(&mut self.show_previous, other.show_previous);
     }
 }
 
@@ -861,6 +907,20 @@ fn validate_config(config: &ResolvedConfig, errors: &mut Vec<ValidationError>) {
         });
     }
 
+    if config.status.line == 0 {
+        errors.push(ValidationError {
+            path: "status.line".to_string(),
+            message: "must be greater than zero".to_string(),
+        });
+    }
+
+    if config.status.max_sessions == Some(0) {
+        errors.push(ValidationError {
+            path: "status.max_sessions".to_string(),
+            message: "must be greater than zero".to_string(),
+        });
+    }
+
     if config.preview.max_file_bytes == 0 {
         errors.push(ValidationError {
             path: "preview.max_file_bytes".to_string(),
@@ -893,6 +953,9 @@ mod tests {
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Nucleo);
         assert!(config.zoxide.enabled);
         assert_eq!(config.logging.level, LogLevel::Warn);
+        assert_eq!(config.status.line, 2);
+        assert!(config.status.interactive);
+        assert_eq!(config.status.max_sessions, None);
     }
 
     #[test]
@@ -908,6 +971,11 @@ mod tests {
             [tmux]
             popup_width = "90%"
             popup_height = "40"
+
+            [status]
+            line = 3
+            max_sessions = 5
+            show_previous = false
 
             [actions]
             ctrl_r = "rename-session"
@@ -926,6 +994,9 @@ mod tests {
         assert_eq!(config.ui.mode, UiMode::Popup);
         assert_eq!(config.ui.preview_width, 0.6);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Skim);
+        assert_eq!(config.status.line, 3);
+        assert_eq!(config.status.max_sessions, Some(5));
+        assert!(!config.status.show_previous);
         assert_eq!(config.actions.ctrl_r, KeyAction::RenameSession);
         assert_eq!(config.actions.ctrl_x, KeyAction::Close);
         assert_eq!(config.actions.ctrl_p, KeyAction::Open);
@@ -976,6 +1047,9 @@ mod tests {
 
             [preview]
             timeout_ms = 0
+
+            [status]
+            line = 0
         "#;
 
         let error = resolve_config(
@@ -995,6 +1069,7 @@ mod tests {
                 assert!(paths.contains(&"ui.preview_width"));
                 assert!(paths.contains(&"tmux.popup_width"));
                 assert!(paths.contains(&"preview.timeout_ms"));
+                assert!(paths.contains(&"status.line"));
             }
             other => panic!("expected validation error, got {other:?}"),
         }

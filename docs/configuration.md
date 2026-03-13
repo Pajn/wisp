@@ -57,6 +57,15 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | `popup_width` | string | `"80%"` | percent or cells | Popup width, for example `"80%"` or `"120"`. |
 | `popup_height` | string | `"85%"` | percent or cells | Popup height, for example `"85%"` or `"40"`. |
 
+### `[status]`
+
+| Key | Type | Default | Valid values | Notes |
+| --- | --- | --- | --- | --- |
+| `line` | integer | `2` | `> 0` | tmux status row used by `wisp statusline install`. |
+| `interactive` | bool | `true` | `true`, `false` | Enables clickable session ranges when tmux 3.4+ mouse ranges are available and mouse mode is on. |
+| `max_sessions` | integer | unset | `> 0` when set | Optional cap on the number of session tokens rendered in the status strip. If omitted, Wisp renders every session and lets tmux truncate to the available width. |
+| `show_previous` | bool | `true` | `true`, `false` | Shows the previous-session marker around the last visited session. |
+
 ### `[zoxide]`
 
 | Key | Type | Default | Valid values | Notes |
@@ -130,6 +139,11 @@ preview_width = 0.6
 prefer_popup = true
 popup_width = "80%"
 popup_height = "85%"
+
+[status]
+line = 2
+interactive = true
+show_previous = true
 
 [zoxide]
 enabled = true

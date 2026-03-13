@@ -29,6 +29,9 @@ pub trait TmuxClient {
     fn close_sidebar_pane(&self, target: Option<&str>) -> Result<(), TmuxError>;
     fn select_pane(&self, target: &str) -> Result<(), TmuxError>;
     fn resize_pane_width(&self, target: &str, width: u16) -> Result<(), TmuxError>;
+    fn status_line_count(&self) -> Result<usize, TmuxError>;
+    fn set_status_line_count(&self, count: usize) -> Result<(), TmuxError>;
+    fn clear_status_line(&self, line: usize) -> Result<(), TmuxError>;
     fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError>;
 }
 
@@ -54,10 +57,14 @@ pub struct TmuxContext {
 pub struct TmuxCapabilities {
     pub version: TmuxVersion,
     pub supports_popup: bool,
+    pub supports_multi_status_lines: bool,
+    pub supports_status_mouse_ranges: bool,
+    pub mouse_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxSession {
+    pub id: String,
     pub name: String,
     pub attached: bool,
     pub windows: usize,
@@ -198,6 +205,16 @@ impl TmuxVersion {
     #[must_use]
     pub fn supports_popup(self) -> bool {
         self.major > 3 || (self.major == 3 && self.minor >= 2)
+    }
+
+    #[must_use]
+    pub fn supports_multi_status_lines(self) -> bool {
+        self.major > 2 || (self.major == 2 && self.minor >= 9)
+    }
+
+    #[must_use]
+    pub fn supports_status_mouse_ranges(self) -> bool {
+        self.major > 3 || (self.major == 3 && self.minor >= 4)
     }
 }
 
@@ -375,10 +392,22 @@ impl TmuxClient for CommandTmuxClient {
     fn capabilities(&self) -> Result<TmuxCapabilities, TmuxError> {
         let output = self.run_tmux(vec!["-V".to_string()])?;
         let version = output.parse::<TmuxVersion>()?;
+        let mouse_enabled = match self.run_tmux(vec![
+            "show-option".to_string(),
+            "-gv".to_string(),
+            "mouse".to_string(),
+        ]) {
+            Ok(output) => parse_tmux_bool(&output, "mouse option")?,
+            Err(TmuxError::CommandFailed { stderr, .. }) if is_no_server_error(&stderr) => false,
+            Err(error) => return Err(error),
+        };
 
         Ok(TmuxCapabilities {
             version,
             supports_popup: version.supports_popup(),
+            supports_multi_status_lines: version.supports_multi_status_lines(),
+            supports_status_mouse_ranges: version.supports_status_mouse_ranges(),
+            mouse_enabled,
         })
     }
 
@@ -422,8 +451,7 @@ impl TmuxClient for CommandTmuxClient {
         let output = match self.run_tmux(vec![
             "list-sessions".to_string(),
             "-F".to_string(),
-            "#{session_name}\t#{session_attached}\t#{session_windows}\t#{session_activity}"
-                .to_string(),
+            "#{session_id}\t#{session_name}\t#{session_attached}\t#{session_windows}\t#{session_activity}".to_string(),
         ]) {
             Ok(output) => output,
             Err(TmuxError::CommandFailed { stderr, .. }) if is_no_server_error(&stderr) => {
@@ -612,6 +640,29 @@ impl TmuxClient for CommandTmuxClient {
             .map(|_| ())
     }
 
+    fn status_line_count(&self) -> Result<usize, TmuxError> {
+        let output = match self.run_tmux(vec![
+            "show-option".to_string(),
+            "-gv".to_string(),
+            "status".to_string(),
+        ]) {
+            Ok(output) => output,
+            Err(TmuxError::CommandFailed { stderr, .. }) if is_no_server_error(&stderr) => {
+                return Ok(1);
+            }
+            Err(error) => return Err(error),
+        };
+        parse_status_line_count(&output)
+    }
+
+    fn set_status_line_count(&self, count: usize) -> Result<(), TmuxError> {
+        self.run_tmux(status_line_count_command(count)).map(|_| ())
+    }
+
+    fn clear_status_line(&self, line: usize) -> Result<(), TmuxError> {
+        self.run_tmux(clear_status_line_command(line)).map(|_| ())
+    }
+
     fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError> {
         self.run_tmux(status_line_command(line, content))
             .map(|_| ())
@@ -705,6 +756,26 @@ pub fn status_line_command(line: usize, content: &str) -> Vec<String> {
         "-gq".to_string(),
         format!("status-format[{slot}]"),
         content.to_string(),
+    ]
+}
+
+#[must_use]
+pub fn clear_status_line_command(line: usize) -> Vec<String> {
+    let slot = line.saturating_sub(1);
+    vec![
+        "set-option".to_string(),
+        "-guq".to_string(),
+        format!("status-format[{slot}]"),
+    ]
+}
+
+#[must_use]
+pub fn status_line_count_command(count: usize) -> Vec<String> {
+    vec![
+        "set-option".to_string(),
+        "-gq".to_string(),
+        "status".to_string(),
+        count.to_string(),
     ]
 }
 
@@ -873,6 +944,7 @@ fn parse_sessions(
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let mut fields = line.split('\t');
+            let id = required_field(fields.next(), "session id", line)?;
             let name = required_field(fields.next(), "session name", line)?;
             let attached =
                 parse_numeric_bool(required_field(fields.next(), "session attached", line)?)?;
@@ -892,6 +964,7 @@ fn parse_sessions(
                 .transpose()?;
 
             Ok(TmuxSession {
+                id: id.to_string(),
                 current: current_session.is_some_and(|current| current == name),
                 name: name.to_string(),
                 attached,
@@ -972,6 +1045,28 @@ fn parse_numeric_bool(value: &str) -> Result<bool, TmuxError> {
         })
 }
 
+fn parse_tmux_bool(value: &str, context: &'static str) -> Result<bool, TmuxError> {
+    match value.trim() {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(TmuxError::Parse {
+            context,
+            message: format!("expected `on` or `off`, got `{other}`"),
+        }),
+    }
+}
+
+fn parse_status_line_count(value: &str) -> Result<usize, TmuxError> {
+    match value.trim() {
+        "off" => Ok(0),
+        "on" => Ok(1),
+        other => other.parse::<usize>().map_err(|_| TmuxError::Parse {
+            context: "status option",
+            message: format!("expected `on`, `off`, or a number, got `{other}`"),
+        }),
+    }
+}
+
 fn required_field<'line>(
     value: Option<&'line str>,
     field: &'static str,
@@ -1005,9 +1100,10 @@ mod tests {
     use crate::{
         EventStrategy, PollingTmuxBackend, PopupCommand, PopupDimension, SidebarPaneSpec,
         SidebarSide, TmuxBackend, TmuxContext, TmuxEvent, TmuxPane, TmuxSession, TmuxSnapshot,
-        TmuxVersion, TmuxWindow, diff_snapshots, focus_session_command, format_popup_command,
-        parse_panes, resize_pane_width_command, select_pane_command, select_pane_title_command,
-        sidebar_pane_command, status_line_command,
+        TmuxVersion, TmuxWindow, clear_status_line_command, diff_snapshots, focus_session_command,
+        format_popup_command, parse_panes, parse_sessions, parse_status_line_count,
+        resize_pane_width_command, select_pane_command, select_pane_title_command,
+        sidebar_pane_command, status_line_command, status_line_count_command,
     };
 
     #[test]
@@ -1019,6 +1115,7 @@ mod tests {
         assert_eq!(version.major, 3);
         assert_eq!(version.minor, 6);
         assert!(version.supports_popup());
+        assert!(version.supports_status_mouse_ranges());
     }
 
     #[test]
@@ -1105,6 +1202,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_tmux_sessions_with_tmux_ids() {
+        let sessions =
+            parse_sessions("$1\talpha\t1\t2\t42\n", Some("alpha")).expect("sessions should parse");
+
+        assert_eq!(
+            sessions,
+            vec![TmuxSession {
+                id: "$1".to_string(),
+                name: "alpha".to_string(),
+                attached: true,
+                windows: 2,
+                current: true,
+                last_activity: Some(42),
+            }]
+        );
+    }
+
+    #[test]
     fn builds_select_pane_commands() {
         assert_eq!(select_pane_command("%3"), vec!["select-pane", "-t", "%3"]);
         assert_eq!(
@@ -1123,6 +1238,21 @@ mod tests {
             status_line_command(2, "Wisp  main"),
             vec!["set-option", "-gq", "status-format[1]", "Wisp  main"]
         );
+        assert_eq!(
+            clear_status_line_command(2),
+            vec!["set-option", "-guq", "status-format[1]"]
+        );
+        assert_eq!(
+            status_line_count_command(2),
+            vec!["set-option", "-gq", "status", "2"]
+        );
+    }
+
+    #[test]
+    fn parses_status_line_counts() {
+        assert_eq!(parse_status_line_count("off").expect("off count"), 0);
+        assert_eq!(parse_status_line_count("on").expect("on count"), 1);
+        assert_eq!(parse_status_line_count("3").expect("numeric count"), 3);
     }
 
     #[test]
@@ -1136,8 +1266,12 @@ mod tests {
                     patch: None,
                 },
                 supports_popup: true,
+                supports_multi_status_lines: true,
+                supports_status_mouse_ranges: true,
+                mouse_enabled: true,
             },
             sessions: vec![TmuxSession {
+                id: "$1".to_string(),
                 name: "alpha".to_string(),
                 attached: false,
                 windows: 1,
@@ -1158,6 +1292,7 @@ mod tests {
             capabilities: previous.capabilities.clone(),
             sessions: vec![
                 TmuxSession {
+                    id: "$1".to_string(),
                     name: "alpha".to_string(),
                     attached: true,
                     windows: 2,
@@ -1165,6 +1300,7 @@ mod tests {
                     last_activity: Some(2),
                 },
                 TmuxSession {
+                    id: "$2".to_string(),
                     name: "beta".to_string(),
                     attached: false,
                     windows: 1,

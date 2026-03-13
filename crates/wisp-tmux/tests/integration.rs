@@ -2,6 +2,7 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -13,13 +14,16 @@ struct TmuxHarness {
     root: PathBuf,
 }
 
+static HARNESS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 impl TmuxHarness {
     fn new() -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be valid")
             .as_nanos();
-        let socket_name = format!("wisp-test-{nonce}");
+        let unique = HARNESS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let socket_name = format!("wisp-test-{nonce}-{unique}");
         let root = std::env::temp_dir().join(&socket_name);
         fs::create_dir_all(&root).expect("temporary tmux root");
 
@@ -97,6 +101,7 @@ fn lists_sessions_from_an_isolated_server() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"alpha"));
     assert!(names.contains(&"beta"));
+    assert!(sessions.iter().all(|session| session.id.starts_with('$')));
 }
 
 #[test]
@@ -209,13 +214,20 @@ fn opens_sidebar_panes_and_updates_status_lines() {
         .close_sidebar_pane(Some(&sidebar_pane))
         .expect("close sidebar pane");
 
-    harness
-        .client()
+    let client = harness.client();
+    client
+        .set_status_line_count(2)
+        .expect("set status line count");
+    assert_eq!(client.status_line_count().expect("status count"), 2);
+    client
         .update_status_line(2, "Wisp  main")
         .expect("update status line");
 
     let rendered = harness.read_value(["show-options", "-gv", "status-format[1]"]);
     assert_eq!(rendered, "Wisp  main");
+    client.clear_status_line(2).expect("clear status line");
+    let cleared = harness.read_value(["show-options", "-gv", "status-format[1]"]);
+    assert_ne!(cleared, "Wisp  main");
 }
 
 #[test]

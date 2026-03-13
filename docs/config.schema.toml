@@ -42,6 +42,20 @@ prefer_popup = true
 popup_width = "80%"
 popup_height = "85%"
 
+[status]
+# tmux status row used by `wisp statusline install`.
+line = 2
+
+# Enable clickable session ranges when tmux 3.4+ and mouse mode are available.
+interactive = true
+
+# Maximum number of sessions rendered into the status strip.
+# Omit this to render every session and let tmux truncate if needed.
+# max_sessions = 8
+
+# Highlight the previously visited session with angle markers.
+show_previous = true
+
 [zoxide]
 # Enable zoxide-backed directory candidates.
 enabled = true

@@ -52,7 +52,7 @@ wisp popup
 wisp fullscreen
 wisp sidebar-popup
 wisp sidebar-pane
-wisp status-line
+wisp statusline install
 ```
 
 Example tmux binding:
@@ -71,6 +71,15 @@ bind-key O run-shell "wisp sidebar-pane"
 
 `wisp sidebar-pane` keeps a Wisp sidebar pane available across the windows in the
 session you open or switch into, so it behaves more like a persistent file tree.
+
+`wisp statusline install` installs a persistent tmux status row backed by
+`wisp statusline render`, with native clickable session switches on tmux 3.4+
+when mouse mode is enabled.
+
+To remove it again, run `wisp statusline uninstall`.
+
+By default the statusline renders every session in stable alphabetical order, and
+tmux truncates the final row if the screen is narrower than the rendered strip.
 
 Config file discovery:
 
