@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     collections::VecDeque,
     env,
     error::Error,
@@ -6,6 +7,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     process::ExitCode,
+    sync::{Arc, Mutex, mpsc},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -44,6 +47,13 @@ enum PreviewMode {
 struct GitWorkItem {
     session_id: String,
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitStatusUpdate {
+    session_id: String,
+    sync: GitBranchSync,
+    dirty: bool,
 }
 
 fn main() -> ExitCode {
@@ -201,7 +211,9 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let mut surface_kind = kind;
     let mut first_frame = true;
     let mut pending_branch_names = git_work_items(&state);
-    let mut pending_branch_status = VecDeque::new();
+    let branch_status_updates =
+        spawn_git_status_workers(pending_branch_names.iter().cloned().collect());
+    let mut deferred_branch_status = BTreeMap::new();
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -285,17 +297,30 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             continue;
         }
 
+        while let Ok(update) = branch_status_updates.try_recv() {
+            if has_branch_name(&session_items, &update.session_id) {
+                update_branch_status(
+                    &mut session_items,
+                    &update.session_id,
+                    update.sync,
+                    update.dirty,
+                );
+            } else {
+                deferred_branch_status.insert(update.session_id.clone(), update);
+            }
+        }
+
         if let Some(work_item) = pending_branch_names.pop_front() {
             if let Some(branch_name) = branch_name_for_directory(&work_item.path) {
                 update_branch_name(&mut session_items, &work_item.session_id, branch_name);
-                pending_branch_status.push_back(work_item);
-            }
-            continue;
-        }
-
-        if let Some(work_item) = pending_branch_status.pop_front() {
-            if let Some((sync, dirty)) = branch_status_for_directory(&work_item.path) {
-                update_branch_status(&mut session_items, &work_item.session_id, sync, dirty);
+                if let Some(update) = deferred_branch_status.remove(&work_item.session_id) {
+                    update_branch_status(
+                        &mut session_items,
+                        &update.session_id,
+                        update.sync,
+                        update.dirty,
+                    );
+                }
             }
             continue;
         }
@@ -407,6 +432,39 @@ fn git_work_items(state: &DomainState) -> VecDeque<GitWorkItem> {
         .collect()
 }
 
+fn spawn_git_status_workers(work_items: Vec<GitWorkItem>) -> mpsc::Receiver<GitStatusUpdate> {
+    let (sender, receiver) = mpsc::channel();
+    let queue = Arc::new(Mutex::new(VecDeque::from(work_items)));
+    let worker_count = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .max(1);
+
+    for _ in 0..worker_count {
+        let sender = sender.clone();
+        let queue = Arc::clone(&queue);
+        thread::spawn(move || {
+            loop {
+                let Some(work_item) = queue.lock().ok().and_then(|mut queue| queue.pop_front())
+                else {
+                    break;
+                };
+
+                if let Some((sync, dirty)) = branch_status_for_directory(&work_item.path) {
+                    let _ = sender.send(GitStatusUpdate {
+                        session_id: work_item.session_id,
+                        sync,
+                        dirty,
+                    });
+                }
+            }
+        });
+    }
+
+    drop(sender);
+    receiver
+}
+
 fn update_branch_name(items: &mut [SessionListItem], session_id: &str, branch_name: String) {
     if let Some(item) = items.iter_mut().find(|item| item.session_id == session_id) {
         item.git_branch = Some(GitBranchStatus {
@@ -415,6 +473,16 @@ fn update_branch_name(items: &mut [SessionListItem], session_id: &str, branch_na
             dirty: false,
         });
     }
+}
+
+fn has_branch_name(items: &[SessionListItem], session_id: &str) -> bool {
+    items.iter().any(|item| {
+        item.session_id == session_id
+            && item
+                .git_branch
+                .as_ref()
+                .is_some_and(|branch| !branch.name.is_empty())
+    })
 }
 
 fn update_branch_status(
