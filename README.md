@@ -74,12 +74,17 @@ session you open or switch into, so it behaves more like a persistent file tree.
 
 `wisp statusline install` installs a persistent tmux status row backed by
 `wisp statusline render`, with native clickable session switches on tmux 3.4+
-when mouse mode is enabled.
+when mouse mode is enabled. Installation also adds tmux hooks so the row redraws
+immediately when sessions are switched, created, renamed, or closed.
 
 To remove it again, run `wisp statusline uninstall`.
 
 By default the statusline renders every session in stable alphabetical order, and
 tmux truncates the final row if the screen is narrower than the rendered strip.
+
+The picker and sidebar default to a recent-session order so the active session
+stays first and the previously visited session stays near the top. Press `Ctrl-S`
+to toggle to stable alphabetical ordering, or set `[ui].session_sort` in config.
 
 Config file discovery:
 

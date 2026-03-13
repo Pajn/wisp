@@ -479,6 +479,18 @@ mod tests {
         ) -> Result<(), wisp_tmux::TmuxError> {
             unreachable!("not used in test");
         }
+
+        fn set_hook(&self, _hook: &str, _command: &str) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn clear_hook(&self, _hook: &str) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
+        fn refresh_client_status(&self) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
     }
 
     #[test]

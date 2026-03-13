@@ -21,8 +21,8 @@ pub use preview::{
 };
 pub use reduce::{DomainEvent, reduce_domain_event};
 pub use view::{
-    GitBranchStatus, GitBranchSync, SessionListItem, StatusSessionItem, derive_candidates,
-    derive_session_list, derive_status_items,
+    GitBranchStatus, GitBranchSync, SessionListItem, SessionListSortMode, StatusSessionItem,
+    derive_candidates, derive_session_list, derive_status_items, sort_session_list_items,
 };
 
 #[cfg(test)]

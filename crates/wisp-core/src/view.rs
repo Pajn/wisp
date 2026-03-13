@@ -11,6 +11,7 @@ pub struct SessionListItem {
     pub label: String,
     pub is_current: bool,
     pub is_previous: bool,
+    pub last_activity: Option<u64>,
     pub attached: bool,
     pub attention: AttentionBadge,
     pub attention_count: usize,
@@ -41,6 +42,12 @@ pub struct StatusSessionItem {
     pub is_current: bool,
     pub is_previous: bool,
     pub badge: AttentionBadge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionListSortMode {
+    Recent,
+    Alphabetical,
 }
 
 #[must_use]
@@ -96,6 +103,7 @@ pub fn derive_session_list(state: &DomainState, client_id: Option<&str>) -> Vec<
                 label: session.name.clone(),
                 is_current: current == Some(session_id),
                 is_previous: previous == Some(session_id),
+                last_activity: session.sort_key.last_activity,
                 attached: session.attached,
                 attention: session.aggregate_alerts.highest_priority,
                 attention_count: session.aggregate_alerts.attention_count,
@@ -112,14 +120,7 @@ pub fn derive_session_list(state: &DomainState, client_id: Option<&str>) -> Vec<
         })
         .collect::<Vec<_>>();
 
-    items.sort_by(|left, right| {
-        right
-            .is_current
-            .cmp(&left.is_current)
-            .then_with(|| right.is_previous.cmp(&left.is_previous))
-            .then_with(|| right.attention.cmp(&left.attention))
-            .then_with(|| left.label.cmp(&right.label))
-    });
+    sort_session_list_items(&mut items, SessionListSortMode::Recent);
     items
 }
 
@@ -147,6 +148,25 @@ pub fn derive_status_items(state: &DomainState, client_id: Option<&str>) -> Vec<
     items
 }
 
+pub fn sort_session_list_items(items: &mut [SessionListItem], mode: SessionListSortMode) {
+    match mode {
+        SessionListSortMode::Recent => items.sort_by(recent_session_cmp),
+        SessionListSortMode::Alphabetical => {
+            items.sort_by(|left, right| left.label.cmp(&right.label));
+        }
+    }
+}
+
+fn recent_session_cmp(left: &SessionListItem, right: &SessionListItem) -> std::cmp::Ordering {
+    right
+        .is_current
+        .cmp(&left.is_current)
+        .then_with(|| right.is_previous.cmp(&left.is_previous))
+        .then_with(|| right.last_activity.cmp(&left.last_activity))
+        .then_with(|| right.attention.cmp(&left.attention))
+        .then_with(|| left.label.cmp(&right.label))
+}
+
 fn directory_candidate(entry: &DirectoryRecord, home: Option<&Path>) -> Candidate {
     Candidate::directory(DirectoryMetadata {
         full_path: entry.path.clone(),
@@ -162,8 +182,9 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use crate::{
-        AlertAggregate, AttentionBadge, ClientFocus, DirectoryRecord, DomainState, SessionRecord,
-        SessionSortKey, WindowRecord, derive_candidates, derive_session_list, derive_status_items,
+        AlertAggregate, AttentionBadge, ClientFocus, DirectoryRecord, DomainState, SessionListItem,
+        SessionListSortMode, SessionRecord, SessionSortKey, WindowRecord, derive_candidates,
+        derive_session_list, derive_status_items, sort_session_list_items,
     };
 
     fn seeded_state() -> DomainState {
@@ -296,5 +317,71 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["aardvark", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn sorts_session_lists_by_requested_mode() {
+        let mut items = vec![
+            SessionListItem {
+                session_id: "beta".to_string(),
+                label: "beta".to_string(),
+                is_current: false,
+                is_previous: true,
+                last_activity: Some(2),
+                attached: false,
+                attention: AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: None,
+                command_hint: None,
+                git_branch: None,
+            },
+            SessionListItem {
+                session_id: "alpha".to_string(),
+                label: "alpha".to_string(),
+                is_current: true,
+                is_previous: false,
+                last_activity: Some(3),
+                attached: false,
+                attention: AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: None,
+                command_hint: None,
+                git_branch: None,
+            },
+            SessionListItem {
+                session_id: "aardvark".to_string(),
+                label: "aardvark".to_string(),
+                is_current: false,
+                is_previous: false,
+                last_activity: Some(1),
+                attached: false,
+                attention: AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: None,
+                command_hint: None,
+                git_branch: None,
+            },
+        ];
+
+        sort_session_list_items(&mut items, SessionListSortMode::Recent);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta", "aardvark"]
+        );
+
+        sort_session_list_items(&mut items, SessionListSortMode::Alphabetical);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aardvark", "alpha", "beta"]
+        );
     }
 }

@@ -33,6 +33,9 @@ pub trait TmuxClient {
     fn set_status_line_count(&self, count: usize) -> Result<(), TmuxError>;
     fn clear_status_line(&self, line: usize) -> Result<(), TmuxError>;
     fn update_status_line(&self, line: usize, content: &str) -> Result<(), TmuxError>;
+    fn set_hook(&self, hook: &str, command: &str) -> Result<(), TmuxError>;
+    fn clear_hook(&self, hook: &str) -> Result<(), TmuxError>;
+    fn refresh_client_status(&self) -> Result<(), TmuxError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -667,6 +670,18 @@ impl TmuxClient for CommandTmuxClient {
         self.run_tmux(status_line_command(line, content))
             .map(|_| ())
     }
+
+    fn set_hook(&self, hook: &str, command: &str) -> Result<(), TmuxError> {
+        self.run_tmux(set_hook_command(hook, command)).map(|_| ())
+    }
+
+    fn clear_hook(&self, hook: &str) -> Result<(), TmuxError> {
+        self.run_tmux(clear_hook_command(hook)).map(|_| ())
+    }
+
+    fn refresh_client_status(&self) -> Result<(), TmuxError> {
+        self.run_tmux(refresh_client_status_command()).map(|_| ())
+    }
 }
 
 #[must_use]
@@ -777,6 +792,26 @@ pub fn status_line_count_command(count: usize) -> Vec<String> {
         "status".to_string(),
         count.to_string(),
     ]
+}
+
+#[must_use]
+pub fn set_hook_command(hook: &str, command: &str) -> Vec<String> {
+    vec![
+        "set-hook".to_string(),
+        "-g".to_string(),
+        hook.to_string(),
+        command.to_string(),
+    ]
+}
+
+#[must_use]
+pub fn clear_hook_command(hook: &str) -> Vec<String> {
+    vec!["set-hook".to_string(), "-gu".to_string(), hook.to_string()]
+}
+
+#[must_use]
+pub fn refresh_client_status_command() -> Vec<String> {
+    vec!["refresh-client".to_string(), "-S".to_string()]
 }
 
 pub trait TmuxBackend {
@@ -1100,10 +1135,11 @@ mod tests {
     use crate::{
         EventStrategy, PollingTmuxBackend, PopupCommand, PopupDimension, SidebarPaneSpec,
         SidebarSide, TmuxBackend, TmuxContext, TmuxEvent, TmuxPane, TmuxSession, TmuxSnapshot,
-        TmuxVersion, TmuxWindow, clear_status_line_command, diff_snapshots, focus_session_command,
-        format_popup_command, parse_panes, parse_sessions, parse_status_line_count,
-        resize_pane_width_command, select_pane_command, select_pane_title_command,
-        sidebar_pane_command, status_line_command, status_line_count_command,
+        TmuxVersion, TmuxWindow, clear_hook_command, clear_status_line_command, diff_snapshots,
+        focus_session_command, format_popup_command, parse_panes, parse_sessions,
+        parse_status_line_count, refresh_client_status_command, resize_pane_width_command,
+        select_pane_command, select_pane_title_command, set_hook_command, sidebar_pane_command,
+        status_line_command, status_line_count_command,
     };
 
     #[test]
@@ -1245,6 +1281,23 @@ mod tests {
         assert_eq!(
             status_line_count_command(2),
             vec!["set-option", "-gq", "status", "2"]
+        );
+        assert_eq!(
+            set_hook_command("client-session-changed[99]", "refresh-client -S"),
+            vec![
+                "set-hook",
+                "-g",
+                "client-session-changed[99]",
+                "refresh-client -S"
+            ]
+        );
+        assert_eq!(
+            clear_hook_command("client-session-changed[99]"),
+            vec!["set-hook", "-gu", "client-session-changed[99]"]
+        );
+        assert_eq!(
+            refresh_client_status_command(),
+            vec!["refresh-client", "-S"]
         );
     }
 

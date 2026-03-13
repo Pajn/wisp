@@ -29,6 +29,7 @@ impl Default for ResolvedConfig {
                 preview_position: PreviewPosition::Right,
                 preview_width: 0.55,
                 border_style: BorderStyle::Rounded,
+                session_sort: SessionSortMode::Recent,
             },
             fuzzy: FuzzyConfig {
                 engine: FuzzyEngine::Nucleo,
@@ -65,6 +66,7 @@ impl Default for ResolvedConfig {
             actions: ActionsConfig {
                 enter: KeyAction::Open,
                 ctrl_r: KeyAction::RenameSession,
+                ctrl_s: KeyAction::ToggleSort,
                 ctrl_x: KeyAction::CloseSession,
                 ctrl_p: KeyAction::TogglePreview,
                 ctrl_d: KeyAction::ToggleDetails,
@@ -86,6 +88,7 @@ pub struct UiConfig {
     pub preview_position: PreviewPosition,
     pub preview_width: f32,
     pub border_style: BorderStyle,
+    pub session_sort: SessionSortMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +140,7 @@ pub struct FilePreviewConfig {
 pub struct ActionsConfig {
     pub enter: KeyAction,
     pub ctrl_r: KeyAction,
+    pub ctrl_s: KeyAction,
     pub ctrl_x: KeyAction,
     pub ctrl_p: KeyAction,
     pub ctrl_d: KeyAction,
@@ -232,10 +236,19 @@ pub enum ZoxideMode {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum SessionSortMode {
+    #[default]
+    Recent,
+    Alphabetical,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum KeyAction {
     #[default]
     Open,
     RenameSession,
+    ToggleSort,
     CloseSession,
     TogglePreview,
     ToggleDetails,
@@ -315,6 +328,10 @@ impl_from_str_for_enum!(UiMode {
 impl_from_str_for_enum!(FuzzyEngine {
     "nucleo" => FuzzyEngine::Nucleo,
     "skim" => FuzzyEngine::Skim,
+});
+impl_from_str_for_enum!(SessionSortMode {
+    "recent" => SessionSortMode::Recent,
+    "alphabetical" => SessionSortMode::Alphabetical,
 });
 impl_from_str_for_enum!(LogLevel {
     "error" => LogLevel::Error,
@@ -593,6 +610,9 @@ impl PartialConfig {
         if let Some(border_style) = self.ui.border_style {
             config.ui.border_style = border_style;
         }
+        if let Some(session_sort) = self.ui.session_sort {
+            config.ui.session_sort = session_sort;
+        }
 
         if let Some(engine) = self.fuzzy.engine {
             config.fuzzy.engine = engine;
@@ -675,6 +695,9 @@ impl PartialConfig {
         if let Some(ctrl_r) = self.actions.ctrl_r {
             config.actions.ctrl_r = ctrl_r;
         }
+        if let Some(ctrl_s) = self.actions.ctrl_s {
+            config.actions.ctrl_s = ctrl_s;
+        }
         if let Some(ctrl_x) = self.actions.ctrl_x {
             config.actions.ctrl_x = ctrl_x;
         }
@@ -716,6 +739,7 @@ struct PartialUiConfig {
     preview_position: Option<PreviewPosition>,
     preview_width: Option<f32>,
     border_style: Option<BorderStyle>,
+    session_sort: Option<SessionSortMode>,
 }
 
 impl PartialUiConfig {
@@ -725,6 +749,7 @@ impl PartialUiConfig {
         merge_option(&mut self.preview_position, other.preview_position);
         merge_option(&mut self.preview_width, other.preview_width);
         merge_option(&mut self.border_style, other.border_style);
+        merge_option(&mut self.session_sort, other.session_sort);
     }
 }
 
@@ -835,6 +860,7 @@ impl PartialFilePreviewConfig {
 struct PartialActionsConfig {
     enter: Option<KeyAction>,
     ctrl_r: Option<KeyAction>,
+    ctrl_s: Option<KeyAction>,
     ctrl_x: Option<KeyAction>,
     ctrl_p: Option<KeyAction>,
     ctrl_d: Option<KeyAction>,
@@ -847,6 +873,7 @@ impl PartialActionsConfig {
     fn merge(&mut self, other: Self) {
         merge_option(&mut self.enter, other.enter);
         merge_option(&mut self.ctrl_r, other.ctrl_r);
+        merge_option(&mut self.ctrl_s, other.ctrl_s);
         merge_option(&mut self.ctrl_x, other.ctrl_x);
         merge_option(&mut self.ctrl_p, other.ctrl_p);
         merge_option(&mut self.ctrl_d, other.ctrl_d);
@@ -941,7 +968,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        CliOverrides, ConfigError, FuzzyEngine, KeyAction, LogLevel, UiMode, resolve_config,
+        CliOverrides, ConfigError, FuzzyEngine, KeyAction, LogLevel, SessionSortMode, UiMode,
+        resolve_config,
     };
 
     #[test]
@@ -953,9 +981,11 @@ mod tests {
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Nucleo);
         assert!(config.zoxide.enabled);
         assert_eq!(config.logging.level, LogLevel::Warn);
+        assert_eq!(config.ui.session_sort, SessionSortMode::Recent);
         assert_eq!(config.status.line, 2);
         assert!(config.status.interactive);
         assert_eq!(config.status.max_sessions, None);
+        assert_eq!(config.actions.ctrl_s, KeyAction::ToggleSort);
     }
 
     #[test]
@@ -964,6 +994,7 @@ mod tests {
             [ui]
             mode = "popup"
             preview_width = 0.6
+            session_sort = "alphabetical"
 
             [fuzzy]
             engine = "skim"
@@ -979,6 +1010,7 @@ mod tests {
 
             [actions]
             ctrl_r = "rename-session"
+            ctrl_s = "toggle-sort"
             ctrl_x = "close"
             ctrl_p = "open"
         "#;
@@ -993,11 +1025,13 @@ mod tests {
 
         assert_eq!(config.ui.mode, UiMode::Popup);
         assert_eq!(config.ui.preview_width, 0.6);
+        assert_eq!(config.ui.session_sort, SessionSortMode::Alphabetical);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Skim);
         assert_eq!(config.status.line, 3);
         assert_eq!(config.status.max_sessions, Some(5));
         assert!(!config.status.show_previous);
         assert_eq!(config.actions.ctrl_r, KeyAction::RenameSession);
+        assert_eq!(config.actions.ctrl_s, KeyAction::ToggleSort);
         assert_eq!(config.actions.ctrl_x, KeyAction::Close);
         assert_eq!(config.actions.ctrl_p, KeyAction::Open);
     }

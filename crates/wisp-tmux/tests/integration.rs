@@ -225,6 +225,14 @@ fn opens_sidebar_panes_and_updates_status_lines() {
 
     let rendered = harness.read_value(["show-options", "-gv", "status-format[1]"]);
     assert_eq!(rendered, "Wisp  main");
+    client
+        .set_hook("client-session-changed[200]", "refresh-client -S")
+        .expect("set status refresh hook");
+    let hooks = harness.read_value(["show-hooks", "-g", "client-session-changed"]);
+    assert!(hooks.contains("refresh-client -S"));
+    client
+        .clear_hook("client-session-changed[200]")
+        .expect("clear status refresh hook");
     client.clear_status_line(2).expect("clear status line");
     let cleared = harness.read_value(["show-options", "-gv", "status-format[1]"]);
     assert_ne!(cleared, "Wisp  main");

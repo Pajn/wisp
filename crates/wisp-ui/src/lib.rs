@@ -34,6 +34,7 @@ pub enum UiIntent {
     SelectPrev,
     ActivateSelected,
     RenameSession,
+    ToggleSort,
     CloseSession,
     FilterChanged(String),
     Backspace,
@@ -47,6 +48,7 @@ pub enum UiIntent {
 pub struct KeyBindings {
     pub enter: UiIntent,
     pub ctrl_r: UiIntent,
+    pub ctrl_s: UiIntent,
     pub ctrl_x: UiIntent,
     pub ctrl_p: UiIntent,
     pub ctrl_d: UiIntent,
@@ -60,6 +62,7 @@ impl Default for KeyBindings {
         Self {
             enter: UiIntent::ActivateSelected,
             ctrl_r: UiIntent::RenameSession,
+            ctrl_s: UiIntent::ToggleSort,
             ctrl_x: UiIntent::CloseSession,
             ctrl_p: UiIntent::TogglePreview,
             ctrl_d: UiIntent::ToggleDetails,
@@ -93,6 +96,9 @@ pub fn translate_key(key: KeyEvent, bindings: &KeyBindings) -> Option<UiIntent> 
         KeyCode::Enter => Some(bindings.enter.clone()),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(bindings.ctrl_r.clone())
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(bindings.ctrl_s.clone())
         }
         KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(bindings.ctrl_x.clone())
@@ -341,9 +347,10 @@ fn rounded_block(title: &str) -> Block<'_> {
 
 fn bindings_help_text(bindings: &KeyBindings) -> String {
     format!(
-        "up/down or ^j/^k move  enter {}  ^r {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
+        "up/down or ^j/^k move  enter {}  ^r {}  ^s {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
         intent_label(&bindings.enter),
         intent_label(&bindings.ctrl_r),
+        intent_label(&bindings.ctrl_s),
         intent_label(&bindings.ctrl_x),
         intent_label(&bindings.ctrl_p),
         intent_label(&bindings.ctrl_d),
@@ -365,6 +372,7 @@ fn intent_label(intent: &UiIntent) -> &'static str {
     match intent {
         UiIntent::ActivateSelected => "open",
         UiIntent::RenameSession => "rename",
+        UiIntent::ToggleSort => "sort",
         UiIntent::CloseSession => "close session",
         UiIntent::TogglePreview => "preview",
         UiIntent::ToggleDetails => "details",
@@ -639,6 +647,7 @@ mod tests {
             label: label.to_string(),
             is_current: false,
             is_previous: false,
+            last_activity: None,
             attached: false,
             attention: AttentionBadge::None,
             attention_count: 0,
@@ -741,6 +750,13 @@ mod tests {
                 &KeyBindings::default(),
             ),
             Some(UiIntent::RenameSession)
+        );
+        assert_eq!(
+            translate_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &KeyBindings::default(),
+            ),
+            Some(UiIntent::ToggleSort)
         );
         assert_eq!(
             translate_key(

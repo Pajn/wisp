@@ -40,6 +40,7 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | `preview_position` | string | `"right"` | `right`, `bottom` | Placement of the preview pane in picker layouts. |
 | `preview_width` | float | `0.55` | `0.2..=0.8` | Width share for the preview pane. |
 | `border_style` | string | `"rounded"` | `plain`, `rounded`, `double`, `thick` | Shared renderer border style. |
+| `session_sort` | string | `"recent"` | `recent`, `alphabetical` | Default picker/sidebar session ordering. `recent` keeps the active session first and the previous session near the top; `alphabetical` matches the stable tab-bar ordering. |
 
 ### `[fuzzy]`
 
@@ -95,16 +96,17 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 
 | Key | Type | Default | Valid values | Notes |
 | --- | --- | --- | --- | --- |
-| `enter` | string | `"open"` | `open`, `rename-session`, `close-session`, `toggle-preview`, `toggle-details`, `toggle-compact-sidebar`, `close` | Action bound to Enter. |
+| `enter` | string | `"open"` | `open`, `rename-session`, `close-session`, `toggle-preview`, `toggle-details`, `toggle-compact-sidebar`, `toggle-sort`, `close` | Action bound to Enter. |
 | `ctrl_r` | string | `"rename-session"` | same as above | Action bound to Ctrl-R. |
 | `ctrl_x` | string | `"close-session"` | same as above | Action bound to Ctrl-X. |
 | `ctrl_p` | string | `"toggle-preview"` | same as above | Action bound to Ctrl-P. |
 | `ctrl_d` | string | `"toggle-details"` | same as above | Action bound to Ctrl-D. |
 | `ctrl_m` | string | `"toggle-compact-sidebar"` | same as above | Action bound to Ctrl-M. |
+| `ctrl_s` | string | `"toggle-sort"` | same as above | Action bound to Ctrl-S. |
 | `esc` | string | `"close"` | same as above | Action bound to Escape. |
 | `ctrl_c` | string | `"close"` | same as above | Action bound to Ctrl-C. |
 
-These bindings control the picker shortcuts Wisp shows in its inline help footer. Navigation keys like arrow keys, `Ctrl-J`, `Ctrl-K`, typing to filter, and Backspace remain built in.
+These bindings control the picker shortcuts Wisp shows in its inline help footer. Navigation keys like arrow keys, `Ctrl-J`, `Ctrl-K`, typing to filter, and Backspace remain built in. The default `Ctrl-S` binding toggles between the recent picker order and stable alphabetical order without losing the current selection.
 When rename mode is active, the input box edits the selected session name, `Enter` commits, and `Esc` or `Ctrl-C` cancels.
 
 ### `[logging]`
@@ -134,6 +136,7 @@ These environment variables are recognized today:
 mode = "popup"
 preview_position = "right"
 preview_width = 0.6
+session_sort = "recent"
 
 [tmux]
 prefer_popup = true

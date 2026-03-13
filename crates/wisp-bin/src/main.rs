@@ -21,10 +21,12 @@ use crossterm::{
 use ratatui::widgets::Clear;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use wisp_app::{CandidateSources, build_domain_state};
-use wisp_config::{CliOverrides, KeyAction, LoadOptions, ResolvedConfig, load_config};
+use wisp_config::{
+    CliOverrides, KeyAction, LoadOptions, ResolvedConfig, SessionSortMode, load_config,
+};
 use wisp_core::{
     DomainState, GitBranchStatus, GitBranchSync, PreviewKey, PreviewRequest, SessionListItem,
-    derive_session_list, derive_status_items,
+    SessionListSortMode, derive_session_list, derive_status_items, sort_session_list_items,
 };
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
 use wisp_preview::{ActivePanePreviewProvider, PreviewProvider, SessionDetailsPreviewProvider};
@@ -39,6 +41,13 @@ use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
 const PREVIEW_REFRESH_DEBOUNCE: Duration = Duration::from_millis(400);
 const SIDEBAR_PANE_TITLE: &str = "Wisp Sidebar";
 const SIDEBAR_PANE_WIDTH: u16 = 36;
+const STATUSLINE_REFRESH_HOOKS: &[&str] = &[
+    "client-session-changed[200]",
+    "session-created[200]",
+    "session-closed[200]",
+    "session-renamed[200]",
+];
+const STATUSLINE_REFRESH_COMMAND: &str = "refresh-client -S";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewMode {
@@ -73,6 +82,7 @@ struct SidebarUiState {
     query: String,
     selected_session_id: Option<String>,
     kind: SurfaceKind,
+    sort_mode: Option<SessionSortMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +279,8 @@ fn install_statusline(
 
     let content = statusline_command_expression(env::current_exe()?);
     tmux.update_status_line(line, &content)?;
+    install_statusline_refresh_hooks(&tmux)?;
+    tmux.refresh_client_status()?;
     println!("Installed Wisp statusline on row {line}.");
     Ok(())
 }
@@ -280,7 +292,23 @@ fn uninstall_statusline(
     let tmux = CommandTmuxClient::new();
     let line = line_override.unwrap_or(config.status.line);
     tmux.clear_status_line(line)?;
+    uninstall_statusline_refresh_hooks(&tmux)?;
+    tmux.refresh_client_status()?;
     println!("Removed Wisp statusline from row {line}.");
+    Ok(())
+}
+
+fn install_statusline_refresh_hooks(tmux: &impl TmuxClient) -> Result<(), TmuxError> {
+    for hook in STATUSLINE_REFRESH_HOOKS {
+        tmux.set_hook(hook, STATUSLINE_REFRESH_COMMAND)?;
+    }
+    Ok(())
+}
+
+fn uninstall_statusline_refresh_hooks(tmux: &impl TmuxClient) -> Result<(), TmuxError> {
+    for hook in STATUSLINE_REFRESH_HOOKS {
+        tmux.clear_hook(hook)?;
+    }
     Ok(())
 }
 
@@ -310,6 +338,32 @@ fn statusline_command_expression(program: PathBuf) -> String {
         args: vec!["statusline".to_string(), "render".to_string()],
     };
     format!("#({})", format_popup_command(&command))
+}
+
+fn apply_session_sort(items: &mut [SessionListItem], sort_mode: SessionSortMode) {
+    let sort_mode = match sort_mode {
+        SessionSortMode::Recent => SessionListSortMode::Recent,
+        SessionSortMode::Alphabetical => SessionListSortMode::Alphabetical,
+    };
+    sort_session_list_items(items, sort_mode);
+}
+
+fn current_session_id(items: &[SessionListItem]) -> Option<&str> {
+    items
+        .iter()
+        .find(|item| item.is_current)
+        .map(|item| item.session_id.as_str())
+}
+
+fn selected_index_for_session(
+    items: &[SessionListItem],
+    query: &str,
+    session_id: Option<&str>,
+) -> Option<usize> {
+    let session_id = session_id?;
+    filter_items(items, query)
+        .iter()
+        .position(|item| item.session_id == session_id)
 }
 
 fn open_popup_or_run_inline(
@@ -368,6 +422,7 @@ fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
 fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
     let mut session_items = derive_session_list(&state, Some("default"));
+    let mut session_sort = config.ui.session_sort;
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
     let mut details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
@@ -379,6 +434,12 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         Some(runtime) => load_sidebar_ui_state(&runtime.session_name)?,
         None => None,
     };
+    if let Some(state) = &saved_sidebar_state
+        && let Some(saved_sort_mode) = state.sort_mode
+    {
+        session_sort = saved_sort_mode;
+    }
+    apply_session_sort(&mut session_items, session_sort);
     let mut query = saved_sidebar_state
         .as_ref()
         .map(|state| state.query.clone())
@@ -386,12 +447,10 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
     let mut selected = saved_sidebar_state
         .as_ref()
         .and_then(|state| {
-            let filtered = filter_items(&session_items, &query);
-            state.selected_session_id.as_ref().and_then(|session_id| {
-                filtered
-                    .iter()
-                    .position(|item| item.session_id == *session_id)
-            })
+            selected_index_for_session(&session_items, &query, state.selected_session_id.as_deref())
+        })
+        .or_else(|| {
+            selected_index_for_session(&session_items, &query, current_session_id(&session_items))
         })
         .unwrap_or(0);
     let mut show_help = true;
@@ -422,7 +481,14 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         if let Some(runtime) = &sidebar_runtime
             && sidebar_requires_handoff(&tmux, runtime)?
         {
-            persist_sidebar_ui_state(runtime, &session_items, &query, surface_kind, selected)?;
+            persist_sidebar_ui_state(
+                runtime,
+                &session_items,
+                &query,
+                surface_kind,
+                session_sort,
+                selected,
+            )?;
             reconcile_sidebar_for_current_context(
                 &tmux,
                 &sidebar_command,
@@ -593,6 +659,32 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         preview_refreshed_at = None;
                     }
                 }
+                UiIntent::ToggleSort => {
+                    if matches!(input_mode, InputMode::Filter) {
+                        let selected_session_id =
+                            filtered.get(selected).map(|item| item.session_id.clone());
+                        session_sort = match session_sort {
+                            SessionSortMode::Recent => SessionSortMode::Alphabetical,
+                            SessionSortMode::Alphabetical => SessionSortMode::Recent,
+                        };
+                        apply_session_sort(&mut session_items, session_sort);
+                        selected = selected_index_for_session(
+                            &session_items,
+                            &query,
+                            selected_session_id.as_deref(),
+                        )
+                        .or_else(|| {
+                            selected_index_for_session(
+                                &session_items,
+                                &query,
+                                current_session_id(&session_items),
+                            )
+                        })
+                        .unwrap_or(0);
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                    }
+                }
                 UiIntent::ActivateSelected => match &input_mode {
                     InputMode::Filter => {
                         if let Some(item) = filtered.get(selected) {
@@ -602,6 +694,7 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                                     &session_items,
                                     &query,
                                     surface_kind,
+                                    session_sort,
                                     selected,
                                 )?;
                             }
@@ -634,17 +727,15 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         tmux.rename_session(&session_id, &new_name)?;
                         let reloaded_state = load_domain_state()?;
                         session_items = derive_session_list(&reloaded_state, Some("default"));
+                        apply_session_sort(&mut session_items, session_sort);
                         details_preview_provider.state = reloaded_state.clone();
                         pending_branch_names = git_work_items(&reloaded_state);
                         deferred_branch_status.clear();
                         query = filter_query.clone();
                         input_mode = InputMode::Filter;
-                        if let Some(index) = session_items
-                            .iter()
-                            .position(|item| item.session_id == new_name)
-                        {
-                            selected = index;
-                        }
+                        selected =
+                            selected_index_for_session(&session_items, &query, Some(&new_name))
+                                .unwrap_or(selected);
                         preview_session_id = None;
                         preview_refreshed_at = None;
                         if preview_enabled {
@@ -709,7 +800,14 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
             if let Some(runtime) = &sidebar_runtime
                 && matches!(input_mode, InputMode::Filter)
             {
-                persist_sidebar_ui_state(runtime, &session_items, &query, surface_kind, selected)?;
+                persist_sidebar_ui_state(
+                    runtime,
+                    &session_items,
+                    &query,
+                    surface_kind,
+                    session_sort,
+                    selected,
+                )?;
             }
         }
         show_help = matches!(surface_kind, SurfaceKind::Picker);
@@ -725,6 +823,7 @@ fn picker_bindings(config: &ResolvedConfig) -> KeyBindings {
     KeyBindings {
         enter: ui_intent_for_action(config.actions.enter),
         ctrl_r: ui_intent_for_action(config.actions.ctrl_r),
+        ctrl_s: ui_intent_for_action(config.actions.ctrl_s),
         ctrl_x: ui_intent_for_action(config.actions.ctrl_x),
         ctrl_p: ui_intent_for_action(config.actions.ctrl_p),
         ctrl_d: ui_intent_for_action(config.actions.ctrl_d),
@@ -738,6 +837,7 @@ fn ui_intent_for_action(action: KeyAction) -> UiIntent {
     match action {
         KeyAction::Open => UiIntent::ActivateSelected,
         KeyAction::RenameSession => UiIntent::RenameSession,
+        KeyAction::ToggleSort => UiIntent::ToggleSort,
         KeyAction::CloseSession => UiIntent::CloseSession,
         KeyAction::TogglePreview => UiIntent::TogglePreview,
         KeyAction::ToggleDetails => UiIntent::ToggleDetails,
@@ -923,7 +1023,7 @@ fn load_sidebar_ui_state(session_name: &str) -> Result<Option<SidebarUiState>, B
         Err(error) => return Err(Box::new(error)),
     };
 
-    let mut parts = raw.splitn(3, '\n');
+    let mut parts = raw.splitn(4, '\n');
     let kind = match parts.next().unwrap_or_default().trim() {
         "compact" => SurfaceKind::SidebarCompact,
         "expanded" => SurfaceKind::SidebarExpanded,
@@ -931,16 +1031,33 @@ fn load_sidebar_ui_state(session_name: &str) -> Result<Option<SidebarUiState>, B
             return Err(format!("invalid sidebar state kind `{value}`").into());
         }
     };
-    let selected_session_id = match parts.next() {
-        Some(value) if !value.trim().is_empty() => Some(value.to_string()),
-        _ => None,
+    let next = parts.next().unwrap_or_default();
+    let (sort_mode, selected_session_id, query) = match next.trim() {
+        "recent" | "alphabetical" => {
+            let sort_mode = next.parse::<SessionSortMode>()?;
+            let selected_session_id = match parts.next() {
+                Some(value) if !value.trim().is_empty() => Some(value.to_string()),
+                _ => None,
+            };
+            let query = parts.next().unwrap_or_default().to_string();
+            (Some(sort_mode), selected_session_id, query)
+        }
+        _ => {
+            let selected_session_id = if !next.trim().is_empty() {
+                Some(next.to_string())
+            } else {
+                None
+            };
+            let query = parts.next().unwrap_or_default().to_string();
+            (None, selected_session_id, query)
+        }
     };
-    let query = parts.next().unwrap_or_default().to_string();
 
     Ok(Some(SidebarUiState {
         query,
         selected_session_id,
         kind,
+        sort_mode,
     }))
 }
 
@@ -949,6 +1066,7 @@ fn persist_sidebar_ui_state(
     session_items: &[SessionListItem],
     query: &str,
     kind: SurfaceKind,
+    sort_mode: SessionSortMode,
     selected: usize,
 ) -> Result<(), Box<dyn Error>> {
     let filtered = filter_items(session_items, query);
@@ -959,6 +1077,7 @@ fn persist_sidebar_ui_state(
             SurfaceKind::SidebarExpanded => SurfaceKind::SidebarExpanded,
             _ => SurfaceKind::SidebarCompact,
         },
+        sort_mode: Some(sort_mode),
     };
     let path = sidebar_state_path(&runtime.session_name);
     let directory = path
@@ -972,7 +1091,11 @@ fn persist_sidebar_ui_state(
         SurfaceKind::Picker => "compact",
     };
     let payload = format!(
-        "{kind_token}\n{}\n{}",
+        "{kind_token}\n{}\n{}\n{}",
+        match state.sort_mode.unwrap_or(SessionSortMode::Recent) {
+            SessionSortMode::Recent => "recent",
+            SessionSortMode::Alphabetical => "alphabetical",
+        },
         state.selected_session_id.as_deref().unwrap_or_default(),
         state.query
     );
@@ -1199,12 +1322,13 @@ fn filter_items(items: &[SessionListItem], query: &str) -> Vec<SessionListItem> 
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
+        fs,
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use wisp_config::ResolvedConfig;
+    use wisp_config::{ResolvedConfig, SessionSortMode};
     use wisp_status::StatusRenderMode;
     use wisp_tmux::{
         PopupCommand, PopupOptions, SidebarPaneSpec, TmuxCapabilities, TmuxClient, TmuxContext,
@@ -1212,11 +1336,14 @@ mod tests {
     };
 
     use crate::{
-        SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, SidebarRuntime, StatuslineCommand, SurfaceKind,
-        clear_sidebar_ui_state, disable_sidebar_for_session, load_sidebar_ui_state,
+        SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, STATUSLINE_REFRESH_COMMAND,
+        STATUSLINE_REFRESH_HOOKS, SidebarRuntime, StatuslineCommand, SurfaceKind,
+        apply_session_sort, clear_sidebar_ui_state, current_session_id,
+        disable_sidebar_for_session, install_statusline_refresh_hooks, load_sidebar_ui_state,
         parse_statusline_command, persist_sidebar_ui_state, reconcile_sidebar_for_current_context,
-        sidebar_requires_handoff, sidebar_surface_command, statusline_command_expression,
-        statusline_mode,
+        selected_index_for_session, sidebar_requires_handoff, sidebar_state_path,
+        sidebar_surface_command, statusline_command_expression, statusline_mode,
+        uninstall_statusline_refresh_hooks,
     };
 
     #[derive(Default)]
@@ -1228,6 +1355,9 @@ mod tests {
         closed_panes: RefCell<Vec<String>>,
         selected_panes: RefCell<Vec<String>>,
         resized_panes: RefCell<Vec<(String, u16)>>,
+        hooks: RefCell<Vec<(String, String)>>,
+        cleared_hooks: RefCell<Vec<String>>,
+        refreshed_status: Cell<bool>,
     }
 
     impl StubTmuxClient {
@@ -1376,6 +1506,23 @@ mod tests {
         fn update_status_line(&self, _line: usize, _content: &str) -> Result<(), TmuxError> {
             unreachable!("not used in test");
         }
+
+        fn set_hook(&self, hook: &str, command: &str) -> Result<(), TmuxError> {
+            self.hooks
+                .borrow_mut()
+                .push((hook.to_string(), command.to_string()));
+            Ok(())
+        }
+
+        fn clear_hook(&self, hook: &str) -> Result<(), TmuxError> {
+            self.cleared_hooks.borrow_mut().push(hook.to_string());
+            Ok(())
+        }
+
+        fn refresh_client_status(&self) -> Result<(), TmuxError> {
+            self.refreshed_status.set(true);
+            Ok(())
+        }
     }
 
     #[test]
@@ -1506,8 +1653,15 @@ mod tests {
             pane_id: Some("%1".to_string()),
         };
         let items = vec![session_item("alpha"), session_item("beta")];
-        persist_sidebar_ui_state(&runtime, &items, "be", SurfaceKind::SidebarExpanded, 0)
-            .expect("state should persist");
+        persist_sidebar_ui_state(
+            &runtime,
+            &items,
+            "be",
+            SurfaceKind::SidebarExpanded,
+            SessionSortMode::Alphabetical,
+            0,
+        )
+        .expect("state should persist");
 
         let state = load_sidebar_ui_state(&session_name)
             .expect("state should load")
@@ -1515,6 +1669,7 @@ mod tests {
         assert_eq!(state.query, "be");
         assert_eq!(state.selected_session_id.as_deref(), Some("beta"));
         assert_eq!(state.kind, SurfaceKind::SidebarExpanded);
+        assert_eq!(state.sort_mode, Some(SessionSortMode::Alphabetical));
 
         clear_sidebar_ui_state(&session_name).expect("state should clear");
         assert!(
@@ -1522,6 +1677,31 @@ mod tests {
                 .expect("state should load")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn sidebar_state_loads_legacy_format_without_overriding_default_sort() {
+        let session_name = format!(
+            "legacy-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        );
+        let state_path = sidebar_state_path(&session_name);
+        fs::create_dir_all(state_path.parent().expect("sidebar state parent"))
+            .expect("state dir should exist");
+        fs::write(&state_path, "compact\nbeta\nneedle").expect("legacy state should write");
+
+        let state = load_sidebar_ui_state(&session_name)
+            .expect("state should load")
+            .expect("state should exist");
+        assert_eq!(state.query, "needle");
+        assert_eq!(state.selected_session_id.as_deref(), Some("beta"));
+        assert_eq!(state.kind, SurfaceKind::SidebarCompact);
+        assert_eq!(state.sort_mode, None);
+
+        clear_sidebar_ui_state(&session_name).expect("state should clear");
     }
 
     #[test]
@@ -1620,12 +1800,76 @@ mod tests {
         assert_eq!(command, "#('/tmp/wisp' 'statusline' 'render')");
     }
 
+    #[test]
+    fn installs_and_clears_statusline_refresh_hooks() {
+        let tmux = StubTmuxClient::default();
+
+        install_statusline_refresh_hooks(&tmux).expect("hooks should install");
+        assert_eq!(
+            tmux.hooks
+                .borrow()
+                .iter()
+                .map(|(hook, _)| hook.as_str())
+                .collect::<Vec<_>>(),
+            STATUSLINE_REFRESH_HOOKS.to_vec()
+        );
+        assert!(
+            tmux.hooks
+                .borrow()
+                .iter()
+                .all(|(_, command)| command == STATUSLINE_REFRESH_COMMAND)
+        );
+
+        uninstall_statusline_refresh_hooks(&tmux).expect("hooks should uninstall");
+        assert_eq!(
+            tmux.cleared_hooks
+                .borrow()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            STATUSLINE_REFRESH_HOOKS.to_vec()
+        );
+    }
+
+    #[test]
+    fn applies_session_sort_modes_and_keeps_current_discoverable() {
+        let mut items = vec![
+            session_item_with_flags("beta", false, true, Some(2)),
+            session_item_with_flags("alpha", true, false, Some(3)),
+            session_item_with_flags("aardvark", false, false, Some(1)),
+        ];
+
+        apply_session_sort(&mut items, SessionSortMode::Alphabetical);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aardvark", "alpha", "beta"]
+        );
+        assert_eq!(current_session_id(&items), Some("alpha"));
+        assert_eq!(
+            selected_index_for_session(&items, "", Some("alpha")),
+            Some(1)
+        );
+    }
+
     fn session_item(session_id: &str) -> wisp_core::SessionListItem {
+        session_item_with_flags(session_id, false, false, None)
+    }
+
+    fn session_item_with_flags(
+        session_id: &str,
+        is_current: bool,
+        is_previous: bool,
+        last_activity: Option<u64>,
+    ) -> wisp_core::SessionListItem {
         wisp_core::SessionListItem {
             session_id: session_id.to_string(),
             label: session_id.to_string(),
-            is_current: false,
-            is_previous: false,
+            is_current,
+            is_previous,
+            last_activity,
             attached: false,
             attention: wisp_core::AttentionBadge::None,
             attention_count: 0,
