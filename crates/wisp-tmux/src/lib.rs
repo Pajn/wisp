@@ -66,6 +66,8 @@ pub struct TmuxWindow {
     pub index: u32,
     pub name: String,
     pub active: bool,
+    pub current_path: Option<PathBuf>,
+    pub current_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,7 +425,7 @@ impl TmuxClient for CommandTmuxClient {
             "list-windows".to_string(),
             "-a".to_string(),
             "-F".to_string(),
-            "#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}".to_string(),
+            "#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_current_path}\t#{pane_current_command}".to_string(),
         ]) {
             Ok(output) => output,
             Err(TmuxError::CommandFailed { stderr, .. }) if is_no_server_error(&stderr) => {
@@ -803,12 +805,16 @@ fn parse_windows(output: &str) -> Result<Vec<TmuxWindow>, TmuxError> {
                 })?;
             let name = required_field(fields.next(), "window name", line)?;
             let active = parse_numeric_bool(required_field(fields.next(), "window active", line)?)?;
+            let current_path = empty_to_none(fields.next()).map(PathBuf::from);
+            let current_command = empty_to_none(fields.next());
 
             Ok(TmuxWindow {
                 session_name: session_name.to_string(),
                 index,
                 name: name.to_string(),
                 active,
+                current_path,
+                current_command,
             })
         })
         .collect()
@@ -993,6 +999,8 @@ mod tests {
                 index: 1,
                 name: "shell".to_string(),
                 active: true,
+                current_path: None,
+                current_command: None,
             }],
         };
 

@@ -2,6 +2,7 @@ use std::{
     env,
     error::Error,
     io::stdout,
+    path::{Path, PathBuf},
     process::ExitCode,
     time::{Duration, Instant},
 };
@@ -11,6 +12,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use ratatui::widgets::Clear;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use wisp_app::{CandidateSources, build_domain_state};
 use wisp_config::{CliOverrides, LoadOptions, load_config};
@@ -174,7 +176,7 @@ fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
 
 fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
-    let session_items = derive_session_list(&state, Some("default"));
+    let session_items = session_list_items(&state);
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
     let details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
@@ -260,6 +262,7 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
 
         terminal.draw(|frame| {
             let area = frame.area();
+            frame.render_widget(Clear, area);
             render_surface(area, frame.buffer_mut(), &model);
         })?;
 
@@ -325,7 +328,7 @@ fn preview_line_budget(
     show_help: bool,
 ) -> Result<usize, Box<dyn Error>> {
     let area = terminal.size()?;
-    let reserved_rows = if show_help { 7 } else { 6 };
+    let reserved_rows = if show_help { 8 } else { 6 };
     Ok(usize::from(area.height.saturating_sub(reserved_rows)).max(1))
 }
 
@@ -346,6 +349,67 @@ fn load_domain_state() -> Result<DomainState, Box<dyn Error>> {
         .load_entries(500)
         .unwrap_or_default();
     Ok(build_domain_state(&CandidateSources { tmux, zoxide }))
+}
+
+fn session_list_items(state: &DomainState) -> Vec<SessionListItem> {
+    let mut items = derive_session_list(state, Some("default"));
+    let branches = git_branches_by_session(state);
+    for item in &mut items {
+        item.git_branch = branches.get(&item.session_id).cloned();
+    }
+    items
+}
+
+fn git_branches_by_session(state: &DomainState) -> std::collections::BTreeMap<String, String> {
+    state
+        .sessions
+        .iter()
+        .filter_map(|(session_id, session)| {
+            let active_window = session
+                .windows
+                .values()
+                .find(|window| window.active)
+                .or_else(|| session.windows.values().next())?;
+            let path = active_window.current_path.as_deref()?;
+            branch_name_for_directory(path).map(|branch| (session_id.clone(), branch))
+        })
+        .collect()
+}
+
+fn branch_name_for_directory(path: &Path) -> Option<String> {
+    path.ancestors().find_map(branch_name_for_git_root)
+}
+
+fn branch_name_for_git_root(path: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(path)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+
+    if let Some(reference) = head.strip_prefix("ref: ") {
+        return reference.rsplit('/').next().map(ToOwned::to_owned);
+    }
+
+    Some(head.chars().take(7).collect())
+}
+
+fn resolve_git_dir(path: &Path) -> Option<PathBuf> {
+    let dot_git = path.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+
+    if !dot_git.is_file() {
+        return None;
+    }
+
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let target = pointer.trim().strip_prefix("gitdir: ")?;
+    let git_dir = Path::new(target);
+    if git_dir.is_absolute() {
+        Some(git_dir.to_path_buf())
+    } else {
+        Some(path.join(git_dir))
+    }
 }
 
 fn filter_items(items: &[SessionListItem], query: &str) -> Vec<SessionListItem> {

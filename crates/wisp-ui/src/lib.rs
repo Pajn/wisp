@@ -3,8 +3,9 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
 use wisp_core::SessionListItem;
 
@@ -91,17 +92,16 @@ fn render_picker(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(if model.show_help { 2 } else { 1 }),
+            Constraint::Length(if model.show_help { 3 } else { 1 }),
         ])
         .split(area);
 
-    Paragraph::new(model.query.as_str())
-        .block(
-            Block::default()
-                .title(model.title.as_str())
-                .borders(Borders::ALL),
-        )
-        .render(chunks[0], buffer);
+    render_boxed_paragraph(
+        chunks[0],
+        buffer,
+        model.title.as_str(),
+        Text::from(model.query.as_str()),
+    );
 
     let body_chunks = if model.preview.is_some() {
         Layout::default()
@@ -118,9 +118,12 @@ fn render_picker(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     render_list(body_chunks[0], buffer, model, false);
 
     if let Some(preview) = &model.preview {
-        Paragraph::new(ansi_preview_text(preview))
-            .block(Block::default().title("Preview").borders(Borders::ALL))
-            .render(body_chunks[1], buffer);
+        render_boxed_paragraph(
+            body_chunks[1],
+            buffer,
+            "Preview",
+            ansi_preview_text(preview),
+        );
     }
 
     render_footer(chunks[2], buffer, model);
@@ -132,17 +135,16 @@ fn render_sidebar(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(4),
-            Constraint::Length(if model.show_help { 2 } else { 1 }),
+            Constraint::Length(if model.show_help { 3 } else { 1 }),
         ])
         .split(area);
 
-    Paragraph::new(model.query.as_str())
-        .block(
-            Block::default()
-                .title(model.title.as_str())
-                .borders(Borders::ALL),
-        )
-        .render(chunks[0], buffer);
+    render_boxed_paragraph(
+        chunks[0],
+        buffer,
+        model.title.as_str(),
+        Text::from(model.query.as_str()),
+    );
 
     render_list(
         chunks[1],
@@ -154,6 +156,42 @@ fn render_sidebar(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
 }
 
 fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: bool) {
+    let branch_width = if compact {
+        0
+    } else {
+        model
+            .items
+            .iter()
+            .filter_map(|item| item.git_branch.as_ref())
+            .map(|branch| branch.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(18)
+    };
+    let marker_width = 3usize;
+    let available_width = usize::from(area.width.saturating_sub(2));
+    let gap_width = if compact { 0 } else { 2 };
+    let session_width = if compact {
+        available_width.saturating_sub(marker_width)
+    } else {
+        let max_session_width = model
+            .items
+            .iter()
+            .map(|item| item.label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(28);
+        let branch_space = if branch_width == 0 {
+            0
+        } else {
+            branch_width + gap_width
+        };
+        let title_budget = available_width
+            .saturating_sub(marker_width + gap_width + branch_space)
+            .max(12);
+        max_session_width.min(title_budget.saturating_sub(8)).max(8)
+    };
+
     let items = model
         .items
         .iter()
@@ -173,17 +211,39 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
                 wisp_core::AttentionBadge::Activity => "#",
                 wisp_core::AttentionBadge::Bell => "!",
             };
+            let icon = format!("{marker}{badge}");
             let text = if compact {
-                format!("{marker} {}{badge}", item.label)
+                format!("{icon} {}", truncate_text(&item.label, session_width))
             } else {
-                format!(
-                    "{marker} {}{} {}",
-                    item.label,
-                    badge,
-                    item.active_window_label.clone().unwrap_or_default()
-                )
-                .trim()
-                .to_string()
+                let branch_space = if branch_width == 0 {
+                    0
+                } else {
+                    branch_width + gap_width
+                };
+                let title_width = available_width
+                    .saturating_sub(marker_width + session_width + gap_width + branch_space);
+                let session = pad_text(&truncate_text(&item.label, session_width), session_width);
+                let title = pad_text(
+                    &truncate_text(
+                        item.active_window_label.as_deref().unwrap_or_default(),
+                        title_width,
+                    ),
+                    title_width,
+                );
+                let branch = item
+                    .git_branch
+                    .as_deref()
+                    .map(|value| truncate_left(value, branch_width))
+                    .unwrap_or_default();
+
+                if branch_width == 0 {
+                    format!("{icon} {session}  {title}")
+                } else {
+                    format!(
+                        "{icon} {session}  {title}  {}",
+                        pad_left(&branch, branch_width)
+                    )
+                }
             };
 
             let style = if index == model.selected {
@@ -196,9 +256,11 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
         })
         .collect::<Vec<_>>();
 
-    List::new(items)
-        .block(Block::default().title("Sessions").borders(Borders::ALL))
-        .render(area, buffer);
+    let block = rounded_block("Sessions");
+    let inner = block.inner(area);
+    block.render(area, buffer);
+    Clear.render(inner, buffer);
+    List::new(items).render(inner, buffer);
 }
 
 fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
@@ -208,20 +270,133 @@ fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
         "esc close"
     };
 
-    Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL))
-        .render(area, buffer);
+    let block = rounded_block("");
+    let inner = block.inner(area);
+    block.render(area, buffer);
+    Clear.render(inner, buffer);
+    Paragraph::new(text).render(inner, buffer);
+}
+
+fn render_boxed_paragraph(area: Rect, buffer: &mut Buffer, title: &str, text: Text<'_>) {
+    let block = rounded_block(title);
+    let inner = block.inner(area);
+    block.render(area, buffer);
+    Clear.render(inner, buffer);
+    Paragraph::new(text).render(inner, buffer);
+}
+
+fn rounded_block(title: &str) -> Block<'_> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+}
+
+fn pad_text(value: &str, width: usize) -> String {
+    let len = value.chars().count();
+    if len >= width {
+        value.to_string()
+    } else {
+        format!("{value}{}", " ".repeat(width - len))
+    }
+}
+
+fn pad_left(value: &str, width: usize) -> String {
+    let len = value.chars().count();
+    if len >= width {
+        value.to_string()
+    } else {
+        format!("{}{value}", " ".repeat(width - len))
+    }
+}
+
+fn truncate_text(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= width {
+        return value.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    chars[..width - 1].iter().collect::<String>() + "…"
+}
+
+fn truncate_left(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= width {
+        return value.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    format!(
+        "…{}",
+        chars[chars.len() - (width - 1)..]
+            .iter()
+            .collect::<String>()
+    )
 }
 
 fn ansi_preview_text(preview: &[String]) -> Text<'static> {
     let mut lines = Vec::with_capacity(preview.len().max(1));
     for line in preview {
-        lines.push(parse_ansi_line(line));
+        lines.push(parse_ansi_line(&sanitize_ansi_input(line)));
     }
     if lines.is_empty() {
         lines.push(Line::default());
     }
     Text::from(lines)
+}
+
+fn sanitize_ansi_input(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\u{1b}' => match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    let mut sequence = String::from("\u{1b}[");
+                    let mut final_byte = None;
+                    while let Some(next) = chars.next() {
+                        sequence.push(next);
+                        if ('@'..='~').contains(&next) {
+                            final_byte = Some(next);
+                            break;
+                        }
+                    }
+                    if final_byte == Some('m') {
+                        sanitized.push_str(&sequence);
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' && matches!(chars.peek(), Some('\\')) {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => {}
+            ch if ch.is_control() => {}
+            _ => sanitized.push(ch),
+        }
+    }
+
+    sanitized
 }
 
 fn parse_ansi_line(input: &str) -> Line<'static> {
@@ -360,7 +535,8 @@ mod tests {
     use wisp_core::{AttentionBadge, SessionListItem};
 
     use crate::{
-        SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface, translate_key,
+        SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface,
+        sanitize_ansi_input, translate_key,
     };
 
     fn item(label: &str) -> SessionListItem {
@@ -375,6 +551,7 @@ mod tests {
             active_window_label: Some("shell".to_string()),
             path_hint: None,
             command_hint: None,
+            git_branch: None,
         }
     }
 
@@ -413,6 +590,13 @@ mod tests {
     }
 
     #[test]
+    fn strips_non_sgr_escape_sequences_from_preview_content() {
+        let sanitized = sanitize_ansi_input("hello\u{1b}[2K\u{1b}[1G\u{1b}[31mred\u{1b}[0m\r");
+
+        assert_eq!(sanitized, "hello\u{1b}[31mred\u{1b}[0m");
+    }
+
+    #[test]
     fn renders_compact_sidebar() {
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 30, 10));
         let mut current = item("alpha");
@@ -436,7 +620,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Sidebar"));
-        assert!(rendered.contains("alpha!"));
+        assert!(rendered.contains("•! alpha"));
     }
 
     #[test]

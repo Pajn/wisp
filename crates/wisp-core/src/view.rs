@@ -17,6 +17,7 @@ pub struct SessionListItem {
     pub active_window_label: Option<String>,
     pub path_hint: Option<String>,
     pub command_hint: Option<String>,
+    pub git_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,7 @@ pub fn derive_session_list(state: &DomainState, client_id: Option<&str>) -> Vec<
                         .map(|path| normalize_display_path(path, None))
                 }),
                 command_hint: active_window.and_then(|window| window.active_command.clone()),
+                git_branch: None,
             }
         })
         .collect::<Vec<_>>();
