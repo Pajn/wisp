@@ -79,14 +79,18 @@ truncate_long_lines = true
 [actions]
 # Valid action names:
 # "open"
-# "switch-session"
-# "open-shell-here"
-# "refresh"
-# "toggle-help"
-# "cancel"
+# "close-session"
+# "toggle-preview"
+# "toggle-details"
+# "toggle-compact-sidebar"
+# "close"
 enter = "open"
-ctrl_s = "switch-session"
-ctrl_e = "open-shell-here"
+ctrl_x = "close-session"
+ctrl_p = "toggle-preview"
+ctrl_d = "toggle-details"
+ctrl_m = "toggle-compact-sidebar"
+esc = "close"
+ctrl_c = "close"
 
 [logging]
 # Log verbosity: "error", "warn", "info", "debug", or "trace".

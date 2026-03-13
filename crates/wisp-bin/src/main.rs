@@ -20,7 +20,7 @@ use crossterm::{
 use ratatui::widgets::Clear;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use wisp_app::{CandidateSources, build_domain_state};
-use wisp_config::{CliOverrides, LoadOptions, load_config};
+use wisp_config::{CliOverrides, KeyAction, LoadOptions, ResolvedConfig, load_config};
 use wisp_core::{
     DomainState, GitBranchStatus, GitBranchSync, PreviewKey, PreviewRequest, SessionListItem,
     derive_session_list, derive_status_items,
@@ -32,7 +32,7 @@ use wisp_tmux::{
     CommandTmuxClient, PollingTmuxBackend, PopupCommand, PopupOptions, PopupSpec, SidebarPaneSpec,
     SidebarSide, TmuxBackend, TmuxClient, TmuxError,
 };
-use wisp_ui::{SurfaceKind, SurfaceModel, UiIntent, render_surface, translate_key};
+use wisp_ui::{KeyBindings, SurfaceKind, SurfaceModel, UiIntent, render_surface, translate_key};
 use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
 
 const PREVIEW_REFRESH_DEBOUNCE: Duration = Duration::from_millis(400);
@@ -83,9 +83,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         "status-line" => update_status_line(),
-        "fullscreen" => run_surface(SurfaceKind::Picker),
-        "popup" => open_popup_or_run_inline(SurfaceKind::Picker),
-        "sidebar-popup" => open_sidebar_popup_or_run_inline(),
+        "fullscreen" => run_surface(SurfaceKind::Picker, &config),
+        "popup" => open_popup_or_run_inline(SurfaceKind::Picker, &config),
+        "sidebar-popup" => open_sidebar_popup_or_run_inline(&config),
         "sidebar-pane" => open_sidebar_pane(),
         "ui" => {
             let inline = env::args().nth(2).unwrap_or_else(|| "picker".to_string());
@@ -94,9 +94,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 "sidebar-expanded" => SurfaceKind::SidebarExpanded,
                 _ => SurfaceKind::Picker,
             };
-            run_surface(kind)
+            run_surface(kind, &config)
         }
-        _ => run_surface(SurfaceKind::Picker),
+        _ => run_surface(SurfaceKind::Picker, &config),
     }
 }
 
@@ -137,7 +137,10 @@ fn update_status_line() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn open_popup_or_run_inline(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
+fn open_popup_or_run_inline(
+    kind: SurfaceKind,
+    config: &ResolvedConfig,
+) -> Result<(), Box<dyn Error>> {
     let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
     let command = PopupCommand {
         program: env::current_exe()?,
@@ -149,13 +152,13 @@ fn open_popup_or_run_inline(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     }) {
         Ok(()) => Ok(()),
         Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
-            run_surface(kind)
+            run_surface(kind, config)
         }
         Err(error) => Err(Box::new(error)),
     }
 }
 
-fn open_sidebar_popup_or_run_inline() -> Result<(), Box<dyn Error>> {
+fn open_sidebar_popup_or_run_inline(config: &ResolvedConfig) -> Result<(), Box<dyn Error>> {
     let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
     let command = PopupCommand {
         program: env::current_exe()?,
@@ -171,7 +174,7 @@ fn open_sidebar_popup_or_run_inline() -> Result<(), Box<dyn Error>> {
     }) {
         Ok(()) => Ok(()),
         Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
-            run_surface(SurfaceKind::SidebarCompact)
+            run_surface(SurfaceKind::SidebarCompact, config)
         }
         Err(error) => Err(Box::new(error)),
     }
@@ -192,7 +195,7 @@ fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
+fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
     let mut session_items = derive_session_list(&state, Some("default"));
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
@@ -203,6 +206,7 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let mut query = String::new();
     let mut selected = 0usize;
     let mut show_help = true;
+    let bindings = picker_bindings(config);
     let mut preview_enabled = matches!(kind, SurfaceKind::Picker);
     let mut preview_mode = PreviewMode::Pane;
     let mut preview = preview_enabled.then_some(Vec::new());
@@ -282,6 +286,7 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             show_help,
             preview: preview.clone(),
             kind: surface_kind,
+            bindings: bindings.clone(),
         };
 
         terminal.draw(|frame| {
@@ -327,7 +332,7 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
 
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key) = event::read()?
-            && let Some(intent) = translate_key(key)
+            && let Some(intent) = translate_key(key, &bindings)
         {
             match intent {
                 UiIntent::SelectNext => {
@@ -395,6 +400,29 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+fn picker_bindings(config: &ResolvedConfig) -> KeyBindings {
+    KeyBindings {
+        enter: ui_intent_for_action(config.actions.enter),
+        ctrl_x: ui_intent_for_action(config.actions.ctrl_x),
+        ctrl_p: ui_intent_for_action(config.actions.ctrl_p),
+        ctrl_d: ui_intent_for_action(config.actions.ctrl_d),
+        ctrl_m: ui_intent_for_action(config.actions.ctrl_m),
+        esc: ui_intent_for_action(config.actions.esc),
+        ctrl_c: ui_intent_for_action(config.actions.ctrl_c),
+    }
+}
+
+fn ui_intent_for_action(action: KeyAction) -> UiIntent {
+    match action {
+        KeyAction::Open => UiIntent::ActivateSelected,
+        KeyAction::CloseSession => UiIntent::CloseSession,
+        KeyAction::TogglePreview => UiIntent::TogglePreview,
+        KeyAction::ToggleDetails => UiIntent::ToggleDetails,
+        KeyAction::ToggleCompactSidebar => UiIntent::ToggleCompactSidebar,
+        KeyAction::Close => UiIntent::Close,
+    }
 }
 
 fn preview_line_budget(

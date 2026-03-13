@@ -57,8 +57,12 @@ impl Default for ResolvedConfig {
             },
             actions: ActionsConfig {
                 enter: KeyAction::Open,
-                ctrl_s: KeyAction::SwitchSession,
-                ctrl_e: KeyAction::OpenShellHere,
+                ctrl_x: KeyAction::CloseSession,
+                ctrl_p: KeyAction::TogglePreview,
+                ctrl_d: KeyAction::ToggleDetails,
+                ctrl_m: KeyAction::ToggleCompactSidebar,
+                esc: KeyAction::Close,
+                ctrl_c: KeyAction::Close,
             },
             logging: LoggingConfig {
                 level: LogLevel::Warn,
@@ -116,8 +120,12 @@ pub struct FilePreviewConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionsConfig {
     pub enter: KeyAction,
-    pub ctrl_s: KeyAction,
-    pub ctrl_e: KeyAction,
+    pub ctrl_x: KeyAction,
+    pub ctrl_p: KeyAction,
+    pub ctrl_d: KeyAction,
+    pub ctrl_m: KeyAction,
+    pub esc: KeyAction,
+    pub ctrl_c: KeyAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,11 +218,11 @@ pub enum ZoxideMode {
 pub enum KeyAction {
     #[default]
     Open,
-    SwitchSession,
-    OpenShellHere,
-    Refresh,
-    ToggleHelp,
-    Cancel,
+    CloseSession,
+    TogglePreview,
+    ToggleDetails,
+    ToggleCompactSidebar,
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -633,11 +641,23 @@ impl PartialConfig {
         if let Some(enter) = self.actions.enter {
             config.actions.enter = enter;
         }
-        if let Some(ctrl_s) = self.actions.ctrl_s {
-            config.actions.ctrl_s = ctrl_s;
+        if let Some(ctrl_x) = self.actions.ctrl_x {
+            config.actions.ctrl_x = ctrl_x;
         }
-        if let Some(ctrl_e) = self.actions.ctrl_e {
-            config.actions.ctrl_e = ctrl_e;
+        if let Some(ctrl_p) = self.actions.ctrl_p {
+            config.actions.ctrl_p = ctrl_p;
+        }
+        if let Some(ctrl_d) = self.actions.ctrl_d {
+            config.actions.ctrl_d = ctrl_d;
+        }
+        if let Some(ctrl_m) = self.actions.ctrl_m {
+            config.actions.ctrl_m = ctrl_m;
+        }
+        if let Some(esc) = self.actions.esc {
+            config.actions.esc = esc;
+        }
+        if let Some(ctrl_c) = self.actions.ctrl_c {
+            config.actions.ctrl_c = ctrl_c;
         }
 
         if let Some(level) = self.logging.level {
@@ -762,15 +782,23 @@ impl PartialFilePreviewConfig {
 #[serde(default)]
 struct PartialActionsConfig {
     enter: Option<KeyAction>,
-    ctrl_s: Option<KeyAction>,
-    ctrl_e: Option<KeyAction>,
+    ctrl_x: Option<KeyAction>,
+    ctrl_p: Option<KeyAction>,
+    ctrl_d: Option<KeyAction>,
+    ctrl_m: Option<KeyAction>,
+    esc: Option<KeyAction>,
+    ctrl_c: Option<KeyAction>,
 }
 
 impl PartialActionsConfig {
     fn merge(&mut self, other: Self) {
         merge_option(&mut self.enter, other.enter);
-        merge_option(&mut self.ctrl_s, other.ctrl_s);
-        merge_option(&mut self.ctrl_e, other.ctrl_e);
+        merge_option(&mut self.ctrl_x, other.ctrl_x);
+        merge_option(&mut self.ctrl_p, other.ctrl_p);
+        merge_option(&mut self.ctrl_d, other.ctrl_d);
+        merge_option(&mut self.ctrl_m, other.ctrl_m);
+        merge_option(&mut self.esc, other.esc);
+        merge_option(&mut self.ctrl_c, other.ctrl_c);
     }
 }
 
@@ -844,7 +872,9 @@ fn validate_config(config: &ResolvedConfig, errors: &mut Vec<ValidationError>) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{CliOverrides, ConfigError, FuzzyEngine, LogLevel, UiMode, resolve_config};
+    use super::{
+        CliOverrides, ConfigError, FuzzyEngine, KeyAction, LogLevel, UiMode, resolve_config,
+    };
 
     #[test]
     fn resolves_default_config_values() {
@@ -870,6 +900,10 @@ mod tests {
             [tmux]
             popup_width = "90%"
             popup_height = "40"
+
+            [actions]
+            ctrl_x = "close"
+            ctrl_p = "open"
         "#;
 
         let config = resolve_config(
@@ -883,6 +917,8 @@ mod tests {
         assert_eq!(config.ui.mode, UiMode::Popup);
         assert_eq!(config.ui.preview_width, 0.6);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Skim);
+        assert_eq!(config.actions.ctrl_x, KeyAction::Close);
+        assert_eq!(config.actions.ctrl_p, KeyAction::Open);
     }
 
     #[test]

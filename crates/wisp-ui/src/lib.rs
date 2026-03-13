@@ -25,6 +25,7 @@ pub struct SurfaceModel {
     pub show_help: bool,
     pub preview: Option<Vec<String>>,
     pub kind: SurfaceKind,
+    pub bindings: KeyBindings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,31 @@ pub enum UiIntent {
     Close,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBindings {
+    pub enter: UiIntent,
+    pub ctrl_x: UiIntent,
+    pub ctrl_p: UiIntent,
+    pub ctrl_d: UiIntent,
+    pub ctrl_m: UiIntent,
+    pub esc: UiIntent,
+    pub ctrl_c: UiIntent,
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        Self {
+            enter: UiIntent::ActivateSelected,
+            ctrl_x: UiIntent::CloseSession,
+            ctrl_p: UiIntent::TogglePreview,
+            ctrl_d: UiIntent::ToggleDetails,
+            ctrl_m: UiIntent::ToggleCompactSidebar,
+            esc: UiIntent::Close,
+            ctrl_c: UiIntent::Close,
+        }
+    }
+}
+
 pub fn render_surface(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     match model.kind {
         SurfaceKind::Picker => render_picker(area, buffer, model),
@@ -51,7 +77,7 @@ pub fn render_surface(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
 }
 
 #[must_use]
-pub fn translate_key(key: KeyEvent) -> Option<UiIntent> {
+pub fn translate_key(key: KeyEvent, bindings: &KeyBindings) -> Option<UiIntent> {
     match key.code {
         KeyCode::Down => Some(UiIntent::SelectNext),
         KeyCode::Up => Some(UiIntent::SelectPrev),
@@ -61,22 +87,22 @@ pub fn translate_key(key: KeyEvent) -> Option<UiIntent> {
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiIntent::SelectPrev)
         }
-        KeyCode::Enter => Some(UiIntent::ActivateSelected),
+        KeyCode::Enter => Some(bindings.enter.clone()),
         KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::CloseSession)
+            Some(bindings.ctrl_x.clone())
         }
-        KeyCode::Esc => Some(UiIntent::Close),
+        KeyCode::Esc => Some(bindings.esc.clone()),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::Close)
+            Some(bindings.ctrl_c.clone())
         }
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::TogglePreview)
+            Some(bindings.ctrl_p.clone())
         }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::ToggleDetails)
+            Some(bindings.ctrl_d.clone())
         }
         KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::ToggleCompactSidebar)
+            Some(bindings.ctrl_m.clone())
         }
         KeyCode::Backspace => Some(UiIntent::Backspace),
         KeyCode::Char(character)
@@ -280,9 +306,9 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
 
 fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     let text = if model.show_help {
-        "up/down or ^j/^k move  enter open  ^x close session  ^p preview  ^d details  ^m compact  esc close"
+        bindings_help_text(&model.bindings)
     } else {
-        "esc close"
+        compact_bindings_help_text(&model.bindings)
     };
 
     let block = rounded_block("");
@@ -305,6 +331,42 @@ fn rounded_block(title: &str) -> Block<'_> {
         .title(title)
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
+}
+
+fn bindings_help_text(bindings: &KeyBindings) -> String {
+    format!(
+        "up/down or ^j/^k move  enter {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
+        intent_label(&bindings.enter),
+        intent_label(&bindings.ctrl_x),
+        intent_label(&bindings.ctrl_p),
+        intent_label(&bindings.ctrl_d),
+        intent_label(&bindings.ctrl_m),
+        intent_label(&bindings.esc),
+        intent_label(&bindings.ctrl_c),
+    )
+}
+
+fn compact_bindings_help_text(bindings: &KeyBindings) -> String {
+    format!(
+        "esc {}  ^c {}",
+        intent_label(&bindings.esc),
+        intent_label(&bindings.ctrl_c),
+    )
+}
+
+fn intent_label(intent: &UiIntent) -> &'static str {
+    match intent {
+        UiIntent::ActivateSelected => "open",
+        UiIntent::CloseSession => "close session",
+        UiIntent::TogglePreview => "preview",
+        UiIntent::ToggleDetails => "details",
+        UiIntent::ToggleCompactSidebar => "compact",
+        UiIntent::Close => "close",
+        UiIntent::SelectNext => "move down",
+        UiIntent::SelectPrev => "move up",
+        UiIntent::FilterChanged(_) => "filter",
+        UiIntent::Backspace => "backspace",
+    }
 }
 
 fn pad_text(value: &str, width: usize) -> String {
@@ -559,7 +621,7 @@ mod tests {
     use wisp_core::{AttentionBadge, SessionListItem};
 
     use crate::{
-        SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface,
+        KeyBindings, SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface,
         sanitize_ansi_input, translate_key,
     };
 
@@ -590,6 +652,7 @@ mod tests {
             show_help: true,
             preview: Some(vec!["preview line".to_string()]),
             kind: SurfaceKind::Picker,
+            bindings: KeyBindings::default(),
         };
 
         render_surface(buffer.area, &mut buffer, &model);
@@ -634,6 +697,7 @@ mod tests {
             show_help: false,
             preview: None,
             kind: SurfaceKind::SidebarCompact,
+            bindings: KeyBindings::default(),
         };
 
         render_surface(buffer.area, &mut buffer, &model);
@@ -650,35 +714,59 @@ mod tests {
     #[test]
     fn translates_supported_keys() {
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            translate_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &KeyBindings::default()
+            ),
             Some(UiIntent::SelectNext)
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            translate_key(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+                &KeyBindings::default(),
+            ),
             Some(UiIntent::SelectNext)
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            translate_key(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                &KeyBindings::default(),
+            ),
             Some(UiIntent::ToggleDetails)
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            translate_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                &KeyBindings::default(),
+            ),
             Some(UiIntent::CloseSession)
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            translate_key(
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+                &KeyBindings::default(),
+            ),
             Some(UiIntent::TogglePreview)
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            translate_key(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &KeyBindings::default(),
+            ),
             Some(UiIntent::FilterChanged("q".to_string()))
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            translate_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &KeyBindings::default(),
+            ),
             Some(UiIntent::FilterChanged("x".to_string()))
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            translate_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &KeyBindings::default()
+            ),
             Some(UiIntent::Close)
         );
     }

@@ -86,9 +86,15 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 
 | Key | Type | Default | Valid values | Notes |
 | --- | --- | --- | --- | --- |
-| `enter` | string | `"open"` | `open`, `switch-session`, `open-shell-here`, `refresh`, `toggle-help`, `cancel` | Action bound to Enter. |
-| `ctrl_s` | string | `"switch-session"` | same as above | Action bound to Ctrl-S. |
-| `ctrl_e` | string | `"open-shell-here"` | same as above | Action bound to Ctrl-E. |
+| `enter` | string | `"open"` | `open`, `close-session`, `toggle-preview`, `toggle-details`, `toggle-compact-sidebar`, `close` | Action bound to Enter. |
+| `ctrl_x` | string | `"close-session"` | same as above | Action bound to Ctrl-X. |
+| `ctrl_p` | string | `"toggle-preview"` | same as above | Action bound to Ctrl-P. |
+| `ctrl_d` | string | `"toggle-details"` | same as above | Action bound to Ctrl-D. |
+| `ctrl_m` | string | `"toggle-compact-sidebar"` | same as above | Action bound to Ctrl-M. |
+| `esc` | string | `"close"` | same as above | Action bound to Escape. |
+| `ctrl_c` | string | `"close"` | same as above | Action bound to Ctrl-C. |
+
+These bindings control the picker shortcuts Wisp shows in its inline help footer. Navigation keys like arrow keys, `Ctrl-J`, `Ctrl-K`, typing to filter, and Backspace remain built in.
 
 ### `[logging]`
 
