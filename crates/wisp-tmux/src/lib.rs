@@ -16,6 +16,7 @@ pub trait TmuxClient {
     fn snapshot(&self, query_windows: bool) -> Result<TmuxSnapshot, TmuxError>;
     fn ensure_session(&self, session_name: &str, directory: &Path) -> Result<(), TmuxError>;
     fn switch_or_attach_session(&self, session_name: &str) -> Result<(), TmuxError>;
+    fn kill_session(&self, session_name: &str) -> Result<(), TmuxError>;
     fn create_or_switch_session(
         &self,
         session_name: &str,
@@ -496,6 +497,15 @@ impl TmuxClient for CommandTmuxClient {
     ) -> Result<(), TmuxError> {
         self.ensure_session(session_name, directory)?;
         self.switch_or_attach_session(session_name)
+    }
+
+    fn kill_session(&self, session_name: &str) -> Result<(), TmuxError> {
+        self.run_tmux(vec![
+            "kill-session".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+        ])
+        .map(|_| ())
     }
 
     fn open_popup(&self, command: &PopupCommand, options: &PopupOptions) -> Result<(), TmuxError> {

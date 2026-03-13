@@ -401,6 +401,10 @@ mod tests {
             unreachable!("not used in test");
         }
 
+        fn kill_session(&self, _session_name: &str) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
         fn create_or_switch_session(
             &self,
             _session_name: &str,

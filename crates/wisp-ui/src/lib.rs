@@ -32,6 +32,7 @@ pub enum UiIntent {
     SelectNext,
     SelectPrev,
     ActivateSelected,
+    CloseSession,
     FilterChanged(String),
     Backspace,
     ToggleCompactSidebar,
@@ -61,6 +62,9 @@ pub fn translate_key(key: KeyEvent) -> Option<UiIntent> {
             Some(UiIntent::SelectPrev)
         }
         KeyCode::Enter => Some(UiIntent::ActivateSelected),
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiIntent::CloseSession)
+        }
         KeyCode::Esc => Some(UiIntent::Close),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiIntent::Close)
@@ -276,7 +280,7 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
 
 fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     let text = if model.show_help {
-        "up/down or ^j/^k move  enter open  ^p preview  ^d details  ^m compact  esc close"
+        "up/down or ^j/^k move  enter open  ^x close session  ^p preview  ^d details  ^m compact  esc close"
     } else {
         "esc close"
     };
@@ -656,6 +660,10 @@ mod tests {
         assert_eq!(
             translate_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
             Some(UiIntent::ToggleDetails)
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            Some(UiIntent::CloseSession)
         );
         assert_eq!(
             translate_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),

@@ -373,6 +373,18 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
                     }
                     break Ok(());
                 }
+                UiIntent::CloseSession => {
+                    if let Some(item) = filtered.get(selected) {
+                        let session_id = item.session_id.clone();
+                        tmux.kill_session(&session_id)?;
+                        session_items.retain(|session| session.session_id != session_id);
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                        if preview_enabled {
+                            preview = Some(Vec::new());
+                        }
+                    }
+                }
                 UiIntent::Close => break Ok(()),
             }
         }

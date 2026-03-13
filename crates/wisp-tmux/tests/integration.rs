@@ -204,3 +204,23 @@ fn opens_sidebar_panes_and_updates_status_lines() {
     let rendered = harness.read_value(["show-options", "-gv", "status-format[1]"]);
     assert_eq!(rendered, "Wisp  main");
 }
+
+#[test]
+fn kills_sessions() {
+    let harness = TmuxHarness::new();
+    harness.seed_session("alpha");
+    harness.seed_session("beta");
+
+    harness
+        .client()
+        .kill_session("alpha")
+        .expect("kill session");
+
+    let sessions = harness
+        .client()
+        .list_sessions()
+        .expect("list tmux sessions");
+
+    assert!(sessions.iter().all(|session| session.name != "alpha"));
+    assert!(sessions.iter().any(|session| session.name == "beta"));
+}
