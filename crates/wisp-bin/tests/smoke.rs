@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_wisp-bin")
+    env!("CARGO_BIN_EXE_wisp")
 }
 
 #[test]
