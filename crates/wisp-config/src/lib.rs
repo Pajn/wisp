@@ -64,7 +64,13 @@ impl Default for ResolvedConfig {
                 },
             },
             actions: ActionsConfig {
+                down: KeyAction::MoveDown,
+                up: KeyAction::MoveUp,
+                ctrl_j: KeyAction::MoveDown,
+                ctrl_k: KeyAction::MoveUp,
                 enter: KeyAction::Open,
+                shift_enter: KeyAction::CreateSessionFromQuery,
+                backspace: KeyAction::Backspace,
                 ctrl_r: KeyAction::RenameSession,
                 ctrl_s: KeyAction::ToggleSort,
                 ctrl_x: KeyAction::CloseSession,
@@ -138,7 +144,13 @@ pub struct FilePreviewConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionsConfig {
+    pub down: KeyAction,
+    pub up: KeyAction,
+    pub ctrl_j: KeyAction,
+    pub ctrl_k: KeyAction,
     pub enter: KeyAction,
+    pub shift_enter: KeyAction,
+    pub backspace: KeyAction,
     pub ctrl_r: KeyAction,
     pub ctrl_s: KeyAction,
     pub ctrl_x: KeyAction,
@@ -245,8 +257,12 @@ pub enum SessionSortMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeyAction {
+    MoveDown,
+    MoveUp,
     #[default]
     Open,
+    CreateSessionFromQuery,
+    Backspace,
     RenameSession,
     ToggleSort,
     CloseSession,
@@ -692,6 +708,24 @@ impl PartialConfig {
         if let Some(enter) = self.actions.enter {
             config.actions.enter = enter;
         }
+        if let Some(down) = self.actions.down {
+            config.actions.down = down;
+        }
+        if let Some(up) = self.actions.up {
+            config.actions.up = up;
+        }
+        if let Some(ctrl_j) = self.actions.ctrl_j {
+            config.actions.ctrl_j = ctrl_j;
+        }
+        if let Some(ctrl_k) = self.actions.ctrl_k {
+            config.actions.ctrl_k = ctrl_k;
+        }
+        if let Some(shift_enter) = self.actions.shift_enter {
+            config.actions.shift_enter = shift_enter;
+        }
+        if let Some(backspace) = self.actions.backspace {
+            config.actions.backspace = backspace;
+        }
         if let Some(ctrl_r) = self.actions.ctrl_r {
             config.actions.ctrl_r = ctrl_r;
         }
@@ -858,7 +892,13 @@ impl PartialFilePreviewConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct PartialActionsConfig {
+    down: Option<KeyAction>,
+    up: Option<KeyAction>,
+    ctrl_j: Option<KeyAction>,
+    ctrl_k: Option<KeyAction>,
     enter: Option<KeyAction>,
+    shift_enter: Option<KeyAction>,
+    backspace: Option<KeyAction>,
     ctrl_r: Option<KeyAction>,
     ctrl_s: Option<KeyAction>,
     ctrl_x: Option<KeyAction>,
@@ -871,7 +911,13 @@ struct PartialActionsConfig {
 
 impl PartialActionsConfig {
     fn merge(&mut self, other: Self) {
+        merge_option(&mut self.down, other.down);
+        merge_option(&mut self.up, other.up);
+        merge_option(&mut self.ctrl_j, other.ctrl_j);
+        merge_option(&mut self.ctrl_k, other.ctrl_k);
         merge_option(&mut self.enter, other.enter);
+        merge_option(&mut self.shift_enter, other.shift_enter);
+        merge_option(&mut self.backspace, other.backspace);
         merge_option(&mut self.ctrl_r, other.ctrl_r);
         merge_option(&mut self.ctrl_s, other.ctrl_s);
         merge_option(&mut self.ctrl_x, other.ctrl_x);
@@ -985,6 +1031,15 @@ mod tests {
         assert_eq!(config.status.line, 2);
         assert!(config.status.interactive);
         assert_eq!(config.status.max_sessions, None);
+        assert_eq!(config.actions.down, KeyAction::MoveDown);
+        assert_eq!(config.actions.up, KeyAction::MoveUp);
+        assert_eq!(config.actions.ctrl_j, KeyAction::MoveDown);
+        assert_eq!(config.actions.ctrl_k, KeyAction::MoveUp);
+        assert_eq!(
+            config.actions.shift_enter,
+            KeyAction::CreateSessionFromQuery
+        );
+        assert_eq!(config.actions.backspace, KeyAction::Backspace);
         assert_eq!(config.actions.ctrl_s, KeyAction::ToggleSort);
     }
 
@@ -1009,10 +1064,16 @@ mod tests {
             show_previous = false
 
             [actions]
+            down = "move-down"
+            up = "move-up"
+            ctrl_j = "move-down"
+            ctrl_k = "move-up"
             ctrl_r = "rename-session"
             ctrl_s = "toggle-sort"
             ctrl_x = "close"
             ctrl_p = "open"
+            shift_enter = "create-session-from-query"
+            backspace = "backspace"
         "#;
 
         let config = resolve_config(
@@ -1030,10 +1091,19 @@ mod tests {
         assert_eq!(config.status.line, 3);
         assert_eq!(config.status.max_sessions, Some(5));
         assert!(!config.status.show_previous);
+        assert_eq!(config.actions.down, KeyAction::MoveDown);
+        assert_eq!(config.actions.up, KeyAction::MoveUp);
+        assert_eq!(config.actions.ctrl_j, KeyAction::MoveDown);
+        assert_eq!(config.actions.ctrl_k, KeyAction::MoveUp);
         assert_eq!(config.actions.ctrl_r, KeyAction::RenameSession);
         assert_eq!(config.actions.ctrl_s, KeyAction::ToggleSort);
         assert_eq!(config.actions.ctrl_x, KeyAction::Close);
         assert_eq!(config.actions.ctrl_p, KeyAction::Open);
+        assert_eq!(
+            config.actions.shift_enter,
+            KeyAction::CreateSessionFromQuery
+        );
+        assert_eq!(config.actions.backspace, KeyAction::Backspace);
     }
 
     #[test]

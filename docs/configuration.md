@@ -96,7 +96,13 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 
 | Key | Type | Default | Valid values | Notes |
 | --- | --- | --- | --- | --- |
-| `enter` | string | `"open"` | `open`, `rename-session`, `close-session`, `toggle-preview`, `toggle-details`, `toggle-compact-sidebar`, `toggle-sort`, `close` | Action bound to Enter. |
+| `down` | string | `"move-down"` | `move-down`, `move-up`, `open`, `create-session-from-query`, `backspace`, `rename-session`, `close-session`, `toggle-preview`, `toggle-details`, `toggle-compact-sidebar`, `toggle-sort`, `close` | Action bound to Down Arrow. |
+| `up` | string | `"move-up"` | same as above | Action bound to Up Arrow. |
+| `ctrl_j` | string | `"move-down"` | same as above | Action bound to Ctrl-J. |
+| `ctrl_k` | string | `"move-up"` | same as above | Action bound to Ctrl-K. |
+| `enter` | string | `"open"` | same as above | Action bound to Enter. |
+| `shift_enter` | string | `"create-session-from-query"` | same as above | Action bound to Shift-Enter. |
+| `backspace` | string | `"backspace"` | same as above | Action bound to Backspace. |
 | `ctrl_r` | string | `"rename-session"` | same as above | Action bound to Ctrl-R. |
 | `ctrl_x` | string | `"close-session"` | same as above | Action bound to Ctrl-X. |
 | `ctrl_p` | string | `"toggle-preview"` | same as above | Action bound to Ctrl-P. |
@@ -106,7 +112,7 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | `esc` | string | `"close"` | same as above | Action bound to Escape. |
 | `ctrl_c` | string | `"close"` | same as above | Action bound to Ctrl-C. |
 
-These bindings control the picker shortcuts Wisp shows in its inline help footer. Navigation keys like arrow keys, `Ctrl-J`, `Ctrl-K`, typing to filter, and Backspace remain built in. The default `Ctrl-S` binding toggles between the recent picker order and stable alphabetical order without losing the current selection.
+These bindings control every special picker shortcut Wisp shows in its inline help footer. Plain character input still appends to the filter query, but navigation, backspace, creation, preview toggles, sort toggles, and close keys are all config-backed. The default `Ctrl-S` binding toggles between the recent picker order and stable alphabetical order without losing the current selection.
 When rename mode is active, the input box edits the selected session name, `Enter` commits, and `Esc` or `Ctrl-C` cancels.
 
 ### `[logging]`

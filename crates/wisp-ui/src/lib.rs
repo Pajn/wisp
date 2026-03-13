@@ -47,7 +47,13 @@ pub enum UiIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyBindings {
+    pub down: UiIntent,
+    pub up: UiIntent,
+    pub ctrl_j: UiIntent,
+    pub ctrl_k: UiIntent,
     pub enter: UiIntent,
+    pub shift_enter: UiIntent,
+    pub backspace: UiIntent,
     pub ctrl_r: UiIntent,
     pub ctrl_s: UiIntent,
     pub ctrl_x: UiIntent,
@@ -61,7 +67,13 @@ pub struct KeyBindings {
 impl Default for KeyBindings {
     fn default() -> Self {
         Self {
+            down: UiIntent::SelectNext,
+            up: UiIntent::SelectPrev,
+            ctrl_j: UiIntent::SelectNext,
+            ctrl_k: UiIntent::SelectPrev,
             enter: UiIntent::ActivateSelected,
+            shift_enter: UiIntent::CreateSessionFromQuery,
+            backspace: UiIntent::Backspace,
             ctrl_r: UiIntent::RenameSession,
             ctrl_s: UiIntent::ToggleSort,
             ctrl_x: UiIntent::CloseSession,
@@ -86,16 +98,16 @@ pub fn render_surface(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
 #[must_use]
 pub fn translate_key(key: KeyEvent, bindings: &KeyBindings) -> Option<UiIntent> {
     match key.code {
-        KeyCode::Down => Some(UiIntent::SelectNext),
-        KeyCode::Up => Some(UiIntent::SelectPrev),
+        KeyCode::Down => Some(bindings.down.clone()),
+        KeyCode::Up => Some(bindings.up.clone()),
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::SelectNext)
+            Some(bindings.ctrl_j.clone())
         }
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::SelectPrev)
+            Some(bindings.ctrl_k.clone())
         }
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            Some(UiIntent::CreateSessionFromQuery)
+            Some(bindings.shift_enter.clone())
         }
         KeyCode::Enter => Some(bindings.enter.clone()),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -120,7 +132,7 @@ pub fn translate_key(key: KeyEvent, bindings: &KeyBindings) -> Option<UiIntent> 
         KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(bindings.ctrl_m.clone())
         }
-        KeyCode::Backspace => Some(UiIntent::Backspace),
+        KeyCode::Backspace => Some(bindings.backspace.clone()),
         KeyCode::Char(character)
             if !key
                 .modifiers
@@ -351,8 +363,14 @@ fn rounded_block(title: &str) -> Block<'_> {
 
 fn bindings_help_text(bindings: &KeyBindings) -> String {
     format!(
-        "up/down or ^j/^k move  enter {}  S-enter create  ^r {}  ^s {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
+        "down {}  up {}  ^j {}  ^k {}  enter {}  S-enter {}  backspace {}  ^r {}  ^s {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
+        intent_label(&bindings.down),
+        intent_label(&bindings.up),
+        intent_label(&bindings.ctrl_j),
+        intent_label(&bindings.ctrl_k),
         intent_label(&bindings.enter),
+        intent_label(&bindings.shift_enter),
+        intent_label(&bindings.backspace),
         intent_label(&bindings.ctrl_r),
         intent_label(&bindings.ctrl_s),
         intent_label(&bindings.ctrl_x),
@@ -758,6 +776,13 @@ mod tests {
         );
         assert_eq!(
             translate_key(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                &KeyBindings::default(),
+            ),
+            Some(UiIntent::Backspace)
+        );
+        assert_eq!(
+            translate_key(
                 KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
                 &KeyBindings::default(),
             ),
@@ -811,6 +836,56 @@ mod tests {
                 &KeyBindings::default()
             ),
             Some(UiIntent::Close)
+        );
+    }
+
+    #[test]
+    fn uses_configured_binding_actions_for_non_text_keys() {
+        let bindings = KeyBindings {
+            down: UiIntent::Close,
+            up: UiIntent::TogglePreview,
+            ctrl_j: UiIntent::ToggleSort,
+            ctrl_k: UiIntent::RenameSession,
+            shift_enter: UiIntent::ActivateSelected,
+            backspace: UiIntent::CloseSession,
+            ..KeyBindings::default()
+        };
+
+        assert_eq!(
+            translate_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &bindings),
+            Some(UiIntent::Close)
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &bindings),
+            Some(UiIntent::TogglePreview)
+        );
+        assert_eq!(
+            translate_key(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+                &bindings
+            ),
+            Some(UiIntent::ToggleSort)
+        );
+        assert_eq!(
+            translate_key(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+                &bindings
+            ),
+            Some(UiIntent::RenameSession)
+        );
+        assert_eq!(
+            translate_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                &bindings
+            ),
+            Some(UiIntent::ActivateSelected)
+        );
+        assert_eq!(
+            translate_key(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                &bindings
+            ),
+            Some(UiIntent::CloseSession)
         );
     }
 }

@@ -95,7 +95,11 @@ truncate_long_lines = true
 
 [actions]
 # Valid action names:
+# "move-down"
+# "move-up"
 # "open"
+# "create-session-from-query"
+# "backspace"
 # "rename-session"
 # "close-session"
 # "toggle-preview"
@@ -103,7 +107,14 @@ truncate_long_lines = true
 # "toggle-compact-sidebar"
 # "toggle-sort"
 # "close"
+# Defaults for the supported special keys:
+down = "move-down"
+up = "move-up"
+ctrl_j = "move-down"
+ctrl_k = "move-up"
 enter = "open"
+shift_enter = "create-session-from-query"
+backspace = "backspace"
 ctrl_r = "rename-session"
 ctrl_x = "close-session"
 ctrl_p = "toggle-preview"

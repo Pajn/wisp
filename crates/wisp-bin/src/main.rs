@@ -872,7 +872,13 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
 
 fn picker_bindings(config: &ResolvedConfig) -> KeyBindings {
     KeyBindings {
+        down: ui_intent_for_action(config.actions.down),
+        up: ui_intent_for_action(config.actions.up),
+        ctrl_j: ui_intent_for_action(config.actions.ctrl_j),
+        ctrl_k: ui_intent_for_action(config.actions.ctrl_k),
         enter: ui_intent_for_action(config.actions.enter),
+        shift_enter: ui_intent_for_action(config.actions.shift_enter),
+        backspace: ui_intent_for_action(config.actions.backspace),
         ctrl_r: ui_intent_for_action(config.actions.ctrl_r),
         ctrl_s: ui_intent_for_action(config.actions.ctrl_s),
         ctrl_x: ui_intent_for_action(config.actions.ctrl_x),
@@ -886,7 +892,11 @@ fn picker_bindings(config: &ResolvedConfig) -> KeyBindings {
 
 fn ui_intent_for_action(action: KeyAction) -> UiIntent {
     match action {
+        KeyAction::MoveDown => UiIntent::SelectNext,
+        KeyAction::MoveUp => UiIntent::SelectPrev,
         KeyAction::Open => UiIntent::ActivateSelected,
+        KeyAction::CreateSessionFromQuery => UiIntent::CreateSessionFromQuery,
+        KeyAction::Backspace => UiIntent::Backspace,
         KeyAction::RenameSession => UiIntent::RenameSession,
         KeyAction::ToggleSort => UiIntent::ToggleSort,
         KeyAction::CloseSession => UiIntent::CloseSession,
@@ -1379,12 +1389,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use wisp_config::{ResolvedConfig, SessionSortMode};
+    use wisp_config::{KeyAction, ResolvedConfig, SessionSortMode};
     use wisp_status::StatusRenderMode;
     use wisp_tmux::{
         PopupCommand, PopupOptions, SidebarPaneSpec, TmuxCapabilities, TmuxClient, TmuxContext,
         TmuxError, TmuxPane, TmuxSession, TmuxSnapshot, TmuxVersion, TmuxWindow,
     };
+    use wisp_ui::UiIntent;
     use wisp_zoxide::{DirectoryEntry, ZoxideError, ZoxideProvider};
 
     use crate::{
@@ -1393,7 +1404,7 @@ mod tests {
         activate_filter_selection, apply_session_sort, clear_sidebar_ui_state,
         create_session_from_query, current_session_id, disable_sidebar_for_session,
         install_statusline_refresh_hooks, load_sidebar_ui_state, parse_statusline_command,
-        persist_sidebar_ui_state, reconcile_sidebar_for_current_context,
+        persist_sidebar_ui_state, picker_bindings, reconcile_sidebar_for_current_context,
         selected_index_for_session, sidebar_requires_handoff, sidebar_state_path,
         sidebar_surface_command, statusline_command_expression, statusline_mode,
         uninstall_statusline_refresh_hooks,
@@ -1924,6 +1935,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             STATUSLINE_REFRESH_HOOKS.to_vec()
         );
+    }
+
+    #[test]
+    fn picker_bindings_follow_the_configured_actions() {
+        let mut config = ResolvedConfig::default();
+        config.actions.down = KeyAction::Close;
+        config.actions.up = KeyAction::TogglePreview;
+        config.actions.ctrl_j = KeyAction::ToggleSort;
+        config.actions.ctrl_k = KeyAction::RenameSession;
+        config.actions.enter = KeyAction::Open;
+        config.actions.shift_enter = KeyAction::CreateSessionFromQuery;
+        config.actions.backspace = KeyAction::Backspace;
+
+        let bindings = picker_bindings(&config);
+
+        assert_eq!(bindings.down, UiIntent::Close);
+        assert_eq!(bindings.up, UiIntent::TogglePreview);
+        assert_eq!(bindings.ctrl_j, UiIntent::ToggleSort);
+        assert_eq!(bindings.ctrl_k, UiIntent::RenameSession);
+        assert_eq!(bindings.enter, UiIntent::ActivateSelected);
+        assert_eq!(bindings.shift_enter, UiIntent::CreateSessionFromQuery);
+        assert_eq!(bindings.backspace, UiIntent::Backspace);
     }
 
     #[test]
