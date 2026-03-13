@@ -175,7 +175,7 @@ fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
 fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
     let session_items = derive_session_list(&state, Some("default"));
-    let pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
+    let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
     let details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
     };
@@ -195,6 +195,8 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let result = loop {
+        pane_preview_provider.max_lines = preview_line_budget(&terminal, show_help)?;
+
         let filtered = filter_items(&session_items, &query);
         if selected >= filtered.len() {
             selected = filtered.len().saturating_sub(1);
@@ -316,6 +318,15 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+fn preview_line_budget(
+    terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    show_help: bool,
+) -> Result<usize, Box<dyn Error>> {
+    let area = terminal.size()?;
+    let reserved_rows = if show_help { 7 } else { 6 };
+    Ok(usize::from(area.height.saturating_sub(reserved_rows)).max(1))
 }
 
 fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> Vec<String> {

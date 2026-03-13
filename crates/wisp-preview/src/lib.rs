@@ -217,7 +217,7 @@ where
                     message: source.to_string(),
                 })?;
 
-        Ok(PreviewContent::from_text(
+        Ok(PreviewContent::from_text_tail(
             format!("Pane {session_name}"),
             captured,
             self.max_lines,
@@ -453,7 +453,7 @@ mod tests {
             })
             .expect("active pane preview");
 
-        assert_eq!(preview.body, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(preview.body, vec!["two".to_string(), "three".to_string()]);
         assert!(preview.truncated);
     }
 }

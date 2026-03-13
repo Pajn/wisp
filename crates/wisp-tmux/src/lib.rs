@@ -439,6 +439,7 @@ impl TmuxClient for CommandTmuxClient {
         self.run_tmux(vec![
             "capture-pane".to_string(),
             "-p".to_string(),
+            "-e".to_string(),
             "-t".to_string(),
             target.to_string(),
         ])

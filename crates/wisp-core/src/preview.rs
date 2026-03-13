@@ -88,6 +88,32 @@ impl PreviewContent {
             truncated,
         }
     }
+
+    #[must_use]
+    pub fn from_text_tail(
+        title: impl Into<String>,
+        text: impl AsRef<str>,
+        max_lines: usize,
+    ) -> Self {
+        let lines = text
+            .as_ref()
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let truncated = lines.len() > max_lines;
+        let start = lines.len().saturating_sub(max_lines);
+        let mut body = lines.into_iter().skip(start).collect::<Vec<_>>();
+
+        if body.is_empty() {
+            body.push(String::new());
+        }
+
+        Self {
+            title: title.into(),
+            body,
+            truncated,
+        }
+    }
 }
 
 #[must_use]

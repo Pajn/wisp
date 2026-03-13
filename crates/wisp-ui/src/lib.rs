@@ -2,8 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
 use wisp_core::SessionListItem;
@@ -118,7 +118,7 @@ fn render_picker(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     render_list(body_chunks[0], buffer, model, false);
 
     if let Some(preview) = &model.preview {
-        Paragraph::new(preview.join("\n"))
+        Paragraph::new(ansi_preview_text(preview))
             .block(Block::default().title("Preview").borders(Borders::ALL))
             .render(body_chunks[1], buffer);
     }
@@ -213,13 +213,155 @@ fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
         .render(area, buffer);
 }
 
+fn ansi_preview_text(preview: &[String]) -> Text<'static> {
+    let mut lines = Vec::with_capacity(preview.len().max(1));
+    for line in preview {
+        lines.push(parse_ansi_line(line));
+    }
+    if lines.is_empty() {
+        lines.push(Line::default());
+    }
+    Text::from(lines)
+}
+
+fn parse_ansi_line(input: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut style = Style::default();
+    let mut chars = input.chars().peekable();
+    let mut plain = String::new();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
+            chars.next();
+            flush_span(&mut spans, &mut plain, style);
+
+            let mut sequence = String::new();
+            while let Some(next) = chars.next() {
+                if next == 'm' {
+                    style = apply_sgr(style, &sequence);
+                    break;
+                }
+                sequence.push(next);
+            }
+        } else {
+            plain.push(ch);
+        }
+    }
+
+    flush_span(&mut spans, &mut plain, style);
+    Line::from(spans)
+}
+
+fn flush_span(spans: &mut Vec<Span<'static>>, plain: &mut String, style: Style) {
+    if plain.is_empty() {
+        return;
+    }
+
+    spans.push(Span::styled(std::mem::take(plain), style));
+}
+
+fn apply_sgr(mut style: Style, sequence: &str) -> Style {
+    let codes = if sequence.is_empty() {
+        vec![0]
+    } else {
+        sequence
+            .split(';')
+            .map(|part| part.parse::<u16>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+
+    let mut index = 0;
+    while index < codes.len() {
+        match codes[index] {
+            0 => style = Style::default(),
+            1 => style = style.add_modifier(Modifier::BOLD),
+            2 => style = style.add_modifier(Modifier::DIM),
+            3 => style = style.add_modifier(Modifier::ITALIC),
+            4 => style = style.add_modifier(Modifier::UNDERLINED),
+            5 => style = style.add_modifier(Modifier::SLOW_BLINK),
+            7 => style = style.add_modifier(Modifier::REVERSED),
+            9 => style = style.add_modifier(Modifier::CROSSED_OUT),
+            22 => style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
+            23 => style = style.remove_modifier(Modifier::ITALIC),
+            24 => style = style.remove_modifier(Modifier::UNDERLINED),
+            25 => style = style.remove_modifier(Modifier::SLOW_BLINK),
+            27 => style = style.remove_modifier(Modifier::REVERSED),
+            29 => style = style.remove_modifier(Modifier::CROSSED_OUT),
+            30..=37 | 90..=97 => {
+                style.fg = Some(ansi_named_color(codes[index]));
+            }
+            39 => style.fg = Some(Color::Reset),
+            40..=47 | 100..=107 => {
+                style.bg = Some(ansi_named_color(codes[index]));
+            }
+            49 => style.bg = Some(Color::Reset),
+            38 | 48 => {
+                let is_foreground = codes[index] == 38;
+                let slice = &codes[index + 1..];
+                if let Some((color, consumed)) = ansi_extended_color(slice) {
+                    if is_foreground {
+                        style.fg = Some(color);
+                    } else {
+                        style.bg = Some(color);
+                    }
+                    index += consumed;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    style
+}
+
+fn ansi_extended_color(codes: &[u16]) -> Option<(Color, usize)> {
+    match codes {
+        [5, value, ..] => Some((Color::Indexed((*value).min(u8::MAX as u16) as u8), 2)),
+        [2, red, green, blue, ..] => Some((
+            Color::Rgb(
+                (*red).min(u8::MAX as u16) as u8,
+                (*green).min(u8::MAX as u16) as u8,
+                (*blue).min(u8::MAX as u16) as u8,
+            ),
+            4,
+        )),
+        _ => None,
+    }
+}
+
+fn ansi_named_color(code: u16) -> Color {
+    match code {
+        30 | 40 => Color::Black,
+        31 | 41 => Color::Red,
+        32 | 42 => Color::Green,
+        33 | 43 => Color::Yellow,
+        34 | 44 => Color::Blue,
+        35 | 45 => Color::Magenta,
+        36 | 46 => Color::Cyan,
+        37 | 47 => Color::Gray,
+        90 | 100 => Color::DarkGray,
+        91 | 101 => Color::LightRed,
+        92 | 102 => Color::LightGreen,
+        93 | 103 => Color::LightYellow,
+        94 | 104 => Color::LightBlue,
+        95 | 105 => Color::LightMagenta,
+        96 | 106 => Color::LightCyan,
+        97 | 107 => Color::White,
+        _ => Color::Reset,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
     use wisp_core::{AttentionBadge, SessionListItem};
 
-    use crate::{SurfaceKind, SurfaceModel, UiIntent, render_surface, translate_key};
+    use crate::{
+        SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface, translate_key,
+    };
 
     fn item(label: &str) -> SessionListItem {
         SessionListItem {
@@ -259,6 +401,15 @@ mod tests {
         assert!(rendered.contains("Wisp Picker"));
         assert!(rendered.contains("Preview"));
         assert!(rendered.contains("alpha"));
+    }
+
+    #[test]
+    fn renders_ansi_colored_preview_content() {
+        let text = ansi_preview_text(&["\u{1b}[31mred\u{1b}[0m".to_string()]);
+        let first_span = &text.lines[0].spans[0];
+
+        assert_eq!(first_span.content, "red");
+        assert_eq!(first_span.style.fg, Some(Color::Red));
     }
 
     #[test]
