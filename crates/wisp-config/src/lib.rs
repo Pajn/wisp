@@ -57,6 +57,7 @@ impl Default for ResolvedConfig {
             },
             actions: ActionsConfig {
                 enter: KeyAction::Open,
+                ctrl_r: KeyAction::RenameSession,
                 ctrl_x: KeyAction::CloseSession,
                 ctrl_p: KeyAction::TogglePreview,
                 ctrl_d: KeyAction::ToggleDetails,
@@ -120,6 +121,7 @@ pub struct FilePreviewConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionsConfig {
     pub enter: KeyAction,
+    pub ctrl_r: KeyAction,
     pub ctrl_x: KeyAction,
     pub ctrl_p: KeyAction,
     pub ctrl_d: KeyAction,
@@ -218,6 +220,7 @@ pub enum ZoxideMode {
 pub enum KeyAction {
     #[default]
     Open,
+    RenameSession,
     CloseSession,
     TogglePreview,
     ToggleDetails,
@@ -641,6 +644,9 @@ impl PartialConfig {
         if let Some(enter) = self.actions.enter {
             config.actions.enter = enter;
         }
+        if let Some(ctrl_r) = self.actions.ctrl_r {
+            config.actions.ctrl_r = ctrl_r;
+        }
         if let Some(ctrl_x) = self.actions.ctrl_x {
             config.actions.ctrl_x = ctrl_x;
         }
@@ -782,6 +788,7 @@ impl PartialFilePreviewConfig {
 #[serde(default)]
 struct PartialActionsConfig {
     enter: Option<KeyAction>,
+    ctrl_r: Option<KeyAction>,
     ctrl_x: Option<KeyAction>,
     ctrl_p: Option<KeyAction>,
     ctrl_d: Option<KeyAction>,
@@ -793,6 +800,7 @@ struct PartialActionsConfig {
 impl PartialActionsConfig {
     fn merge(&mut self, other: Self) {
         merge_option(&mut self.enter, other.enter);
+        merge_option(&mut self.ctrl_r, other.ctrl_r);
         merge_option(&mut self.ctrl_x, other.ctrl_x);
         merge_option(&mut self.ctrl_p, other.ctrl_p);
         merge_option(&mut self.ctrl_d, other.ctrl_d);
@@ -902,6 +910,7 @@ mod tests {
             popup_height = "40"
 
             [actions]
+            ctrl_r = "rename-session"
             ctrl_x = "close"
             ctrl_p = "open"
         "#;
@@ -917,6 +926,7 @@ mod tests {
         assert_eq!(config.ui.mode, UiMode::Popup);
         assert_eq!(config.ui.preview_width, 0.6);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Skim);
+        assert_eq!(config.actions.ctrl_r, KeyAction::RenameSession);
         assert_eq!(config.actions.ctrl_x, KeyAction::Close);
         assert_eq!(config.actions.ctrl_p, KeyAction::Open);
     }

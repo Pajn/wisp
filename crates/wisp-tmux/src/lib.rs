@@ -16,6 +16,7 @@ pub trait TmuxClient {
     fn snapshot(&self, query_windows: bool) -> Result<TmuxSnapshot, TmuxError>;
     fn ensure_session(&self, session_name: &str, directory: &Path) -> Result<(), TmuxError>;
     fn switch_or_attach_session(&self, session_name: &str) -> Result<(), TmuxError>;
+    fn rename_session(&self, session_name: &str, new_name: &str) -> Result<(), TmuxError>;
     fn kill_session(&self, session_name: &str) -> Result<(), TmuxError>;
     fn create_or_switch_session(
         &self,
@@ -488,6 +489,16 @@ impl TmuxClient for CommandTmuxClient {
     fn switch_or_attach_session(&self, session_name: &str) -> Result<(), TmuxError> {
         self.run_tmux(focus_session_command(session_name, self.inside_tmux))
             .map(|_| ())
+    }
+
+    fn rename_session(&self, session_name: &str, new_name: &str) -> Result<(), TmuxError> {
+        self.run_tmux(vec![
+            "rename-session".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+            new_name.to_string(),
+        ])
+        .map(|_| ())
     }
 
     fn create_or_switch_session(

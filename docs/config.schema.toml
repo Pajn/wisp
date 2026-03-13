@@ -79,12 +79,14 @@ truncate_long_lines = true
 [actions]
 # Valid action names:
 # "open"
+# "rename-session"
 # "close-session"
 # "toggle-preview"
 # "toggle-details"
 # "toggle-compact-sidebar"
 # "close"
 enter = "open"
+ctrl_r = "rename-session"
 ctrl_x = "close-session"
 ctrl_p = "toggle-preview"
 ctrl_d = "toggle-details"

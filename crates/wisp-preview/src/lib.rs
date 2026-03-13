@@ -401,6 +401,14 @@ mod tests {
             unreachable!("not used in test");
         }
 
+        fn rename_session(
+            &self,
+            _session_name: &str,
+            _new_name: &str,
+        ) -> Result<(), wisp_tmux::TmuxError> {
+            unreachable!("not used in test");
+        }
+
         fn kill_session(&self, _session_name: &str) -> Result<(), wisp_tmux::TmuxError> {
             unreachable!("not used in test");
         }

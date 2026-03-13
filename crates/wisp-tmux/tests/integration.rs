@@ -224,3 +224,22 @@ fn kills_sessions() {
     assert!(sessions.iter().all(|session| session.name != "alpha"));
     assert!(sessions.iter().any(|session| session.name == "beta"));
 }
+
+#[test]
+fn renames_sessions() {
+    let harness = TmuxHarness::new();
+    harness.seed_session("alpha");
+
+    harness
+        .client()
+        .rename_session("alpha", "renamed")
+        .expect("rename session");
+
+    let sessions = harness
+        .client()
+        .list_sessions()
+        .expect("list tmux sessions");
+
+    assert!(sessions.iter().all(|session| session.name != "alpha"));
+    assert!(sessions.iter().any(|session| session.name == "renamed"));
+}

@@ -44,6 +44,15 @@ enum PreviewMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum InputMode {
+    Filter,
+    Rename {
+        session_id: String,
+        filter_query: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GitWorkItem {
     session_id: String,
     path: PathBuf,
@@ -199,7 +208,7 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
     let state = load_domain_state()?;
     let mut session_items = derive_session_list(&state, Some("default"));
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
-    let details_preview_provider = SessionDetailsPreviewProvider {
+    let mut details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
     };
     let tmux = CommandTmuxClient::new();
@@ -207,6 +216,7 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
     let mut selected = 0usize;
     let mut show_help = true;
     let bindings = picker_bindings(config);
+    let mut input_mode = InputMode::Filter;
     let mut preview_enabled = matches!(kind, SurfaceKind::Picker);
     let mut preview_mode = PreviewMode::Pane;
     let mut preview = preview_enabled.then_some(Vec::new());
@@ -226,7 +236,10 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
     let result = loop {
         pane_preview_provider.max_lines = preview_line_budget(&terminal, show_help)?;
 
-        let filtered = filter_items(&session_items, &query);
+        let filtered = match input_mode {
+            InputMode::Filter => filter_items(&session_items, &query),
+            InputMode::Rename { .. } => session_items.clone(),
+        };
         if selected >= filtered.len() {
             selected = filtered.len().saturating_sub(1);
         }
@@ -275,10 +288,11 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         }
 
         let model = SurfaceModel {
-            title: match surface_kind {
-                SurfaceKind::Picker => "Wisp Picker".to_string(),
-                SurfaceKind::SidebarCompact => "Wisp Sidebar".to_string(),
-                SurfaceKind::SidebarExpanded => "Wisp Sidebar+".to_string(),
+            title: match (&surface_kind, &input_mode) {
+                (SurfaceKind::Picker, InputMode::Rename { .. }) => "Rename Session".to_string(),
+                (SurfaceKind::Picker, InputMode::Filter) => "Wisp Picker".to_string(),
+                (SurfaceKind::SidebarCompact, _) => "Wisp Sidebar".to_string(),
+                (SurfaceKind::SidebarExpanded, _) => "Wisp Sidebar+".to_string(),
             },
             query: query.clone(),
             items: filtered.clone(),
@@ -336,50 +350,112 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         {
             match intent {
                 UiIntent::SelectNext => {
-                    if !filtered.is_empty() {
+                    if matches!(input_mode, InputMode::Filter) && !filtered.is_empty() {
                         selected = (selected + 1).min(filtered.len() - 1);
                     }
                 }
                 UiIntent::SelectPrev => {
-                    selected = selected.saturating_sub(1);
+                    if matches!(input_mode, InputMode::Filter) {
+                        selected = selected.saturating_sub(1);
+                    }
                 }
                 UiIntent::FilterChanged(fragment) => {
                     query.push_str(&fragment);
-                    selected = 0;
+                    if matches!(input_mode, InputMode::Filter) {
+                        selected = 0;
+                    }
                 }
                 UiIntent::Backspace => {
                     query.pop();
-                    selected = 0;
+                    if matches!(input_mode, InputMode::Filter) {
+                        selected = 0;
+                    }
                 }
                 UiIntent::ToggleCompactSidebar => {
-                    surface_kind = match surface_kind {
-                        SurfaceKind::SidebarCompact => SurfaceKind::SidebarExpanded,
-                        SurfaceKind::SidebarExpanded => SurfaceKind::SidebarCompact,
-                        other => other,
-                    };
+                    if matches!(input_mode, InputMode::Filter) {
+                        surface_kind = match surface_kind {
+                            SurfaceKind::SidebarCompact => SurfaceKind::SidebarExpanded,
+                            SurfaceKind::SidebarExpanded => SurfaceKind::SidebarCompact,
+                            other => other,
+                        };
+                    }
                 }
                 UiIntent::TogglePreview => {
-                    preview_enabled = !preview_enabled;
-                    preview = preview_enabled.then_some(Vec::new());
-                    preview_session_id = None;
-                    preview_refreshed_at = None;
+                    if matches!(input_mode, InputMode::Filter) {
+                        preview_enabled = !preview_enabled;
+                        preview = preview_enabled.then_some(Vec::new());
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                    }
                 }
                 UiIntent::ToggleDetails => {
-                    preview_mode = match preview_mode {
-                        PreviewMode::Pane => PreviewMode::Details,
-                        PreviewMode::Details => PreviewMode::Pane,
-                    };
-                    preview_session_id = None;
-                    preview_refreshed_at = None;
-                }
-                UiIntent::ActivateSelected => {
-                    if let Some(item) = filtered.get(selected) {
-                        tmux.switch_or_attach_session(&item.session_id)?;
+                    if matches!(input_mode, InputMode::Filter) {
+                        preview_mode = match preview_mode {
+                            PreviewMode::Pane => PreviewMode::Details,
+                            PreviewMode::Details => PreviewMode::Pane,
+                        };
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
                     }
-                    break Ok(());
+                }
+                UiIntent::ActivateSelected => match &input_mode {
+                    InputMode::Filter => {
+                        if let Some(item) = filtered.get(selected) {
+                            tmux.switch_or_attach_session(&item.session_id)?;
+                        }
+                        break Ok(());
+                    }
+                    InputMode::Rename {
+                        session_id,
+                        filter_query,
+                    } => {
+                        let new_name = query.trim().to_string();
+                        if new_name.is_empty() || new_name == *session_id {
+                            query = filter_query.clone();
+                            input_mode = InputMode::Filter;
+                            preview_session_id = None;
+                            preview_refreshed_at = None;
+                            continue;
+                        }
+
+                        tmux.rename_session(session_id, &new_name)?;
+                        let reloaded_state = load_domain_state()?;
+                        session_items = derive_session_list(&reloaded_state, Some("default"));
+                        details_preview_provider.state = reloaded_state.clone();
+                        pending_branch_names = git_work_items(&reloaded_state);
+                        deferred_branch_status.clear();
+                        query = filter_query.clone();
+                        input_mode = InputMode::Filter;
+                        if let Some(index) = session_items
+                            .iter()
+                            .position(|item| item.session_id == new_name)
+                        {
+                            selected = index;
+                        }
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                        if preview_enabled {
+                            preview = Some(Vec::new());
+                        }
+                    }
+                },
+                UiIntent::RenameSession => {
+                    if matches!(input_mode, InputMode::Filter)
+                        && let Some(item) = filtered.get(selected)
+                    {
+                        input_mode = InputMode::Rename {
+                            session_id: item.session_id.clone(),
+                            filter_query: query.clone(),
+                        };
+                        query = item.session_id.clone();
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                    }
                 }
                 UiIntent::CloseSession => {
-                    if let Some(item) = filtered.get(selected) {
+                    if matches!(input_mode, InputMode::Filter)
+                        && let Some(item) = filtered.get(selected)
+                    {
                         let session_id = item.session_id.clone();
                         tmux.kill_session(&session_id)?;
                         session_items.retain(|session| session.session_id != session_id);
@@ -390,7 +466,15 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         }
                     }
                 }
-                UiIntent::Close => break Ok(()),
+                UiIntent::Close => match &input_mode {
+                    InputMode::Filter => break Ok(()),
+                    InputMode::Rename { filter_query, .. } => {
+                        query = filter_query.clone();
+                        input_mode = InputMode::Filter;
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                    }
+                },
             }
         }
         show_help = matches!(surface_kind, SurfaceKind::Picker);
@@ -405,6 +489,7 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
 fn picker_bindings(config: &ResolvedConfig) -> KeyBindings {
     KeyBindings {
         enter: ui_intent_for_action(config.actions.enter),
+        ctrl_r: ui_intent_for_action(config.actions.ctrl_r),
         ctrl_x: ui_intent_for_action(config.actions.ctrl_x),
         ctrl_p: ui_intent_for_action(config.actions.ctrl_p),
         ctrl_d: ui_intent_for_action(config.actions.ctrl_d),
@@ -417,6 +502,7 @@ fn picker_bindings(config: &ResolvedConfig) -> KeyBindings {
 fn ui_intent_for_action(action: KeyAction) -> UiIntent {
     match action {
         KeyAction::Open => UiIntent::ActivateSelected,
+        KeyAction::RenameSession => UiIntent::RenameSession,
         KeyAction::CloseSession => UiIntent::CloseSession,
         KeyAction::TogglePreview => UiIntent::TogglePreview,
         KeyAction::ToggleDetails => UiIntent::ToggleDetails,
