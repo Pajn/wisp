@@ -23,8 +23,15 @@ pub struct SessionListItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitBranchStatus {
     pub name: String,
-    pub pushed: bool,
+    pub sync: GitBranchSync,
     pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitBranchSync {
+    Unknown,
+    Pushed,
+    NotPushed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

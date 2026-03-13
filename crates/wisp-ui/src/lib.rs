@@ -7,7 +7,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
-use wisp_core::{GitBranchStatus, SessionListItem};
+use wisp_core::{GitBranchStatus, GitBranchSync, SessionListItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceKind {
@@ -355,10 +355,10 @@ fn truncate_left(value: &str, width: usize) -> String {
 }
 
 fn branch_style(branch: &GitBranchStatus) -> Style {
-    let color = if branch.pushed {
-        Color::Green
-    } else {
-        Color::Red
+    let color = match branch.sync {
+        GitBranchSync::Unknown => Color::Gray,
+        GitBranchSync::Pushed => Color::Green,
+        GitBranchSync::NotPushed => Color::Red,
     };
     Style::default().fg(color)
 }

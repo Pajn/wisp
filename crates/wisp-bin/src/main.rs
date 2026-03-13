@@ -1,8 +1,9 @@
 use std::{
+    collections::VecDeque,
     env,
     error::Error,
     io::stdout,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     process::ExitCode,
     time::{Duration, Instant},
@@ -18,8 +19,8 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use wisp_app::{CandidateSources, build_domain_state};
 use wisp_config::{CliOverrides, LoadOptions, load_config};
 use wisp_core::{
-    DomainState, GitBranchStatus, PreviewKey, PreviewRequest, SessionListItem, derive_session_list,
-    derive_status_items,
+    DomainState, GitBranchStatus, GitBranchSync, PreviewKey, PreviewRequest, SessionListItem,
+    derive_session_list, derive_status_items,
 };
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
 use wisp_preview::{ActivePanePreviewProvider, PreviewProvider, SessionDetailsPreviewProvider};
@@ -39,11 +40,10 @@ enum PreviewMode {
     Details,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupStage {
-    BareList,
-    BranchesReady,
-    Interactive,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitWorkItem {
+    session_id: String,
+    path: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -199,7 +199,9 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
     let mut preview_session_id = None;
     let mut preview_refreshed_at: Option<Instant> = None;
     let mut surface_kind = kind;
-    let mut startup_stage = StartupStage::BareList;
+    let mut first_frame = true;
+    let mut pending_branch_names = git_work_items(&state);
+    let mut pending_branch_status = VecDeque::new();
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -213,7 +215,7 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             selected = filtered.len().saturating_sub(1);
         }
         let selected_item = filtered.get(selected);
-        let should_refresh_preview = startup_stage == StartupStage::Interactive
+        let should_refresh_preview = !first_frame
             && preview_enabled
             && selected_item.is_some()
             && match (
@@ -276,19 +278,26 @@ fn run_surface(kind: SurfaceKind) -> Result<(), Box<dyn Error>> {
             render_surface(area, frame.buffer_mut(), &model);
         })?;
 
-        match startup_stage {
-            StartupStage::BareList => {
-                enrich_session_list_items(&mut session_items, &state);
-                startup_stage = StartupStage::BranchesReady;
-                continue;
+        if first_frame {
+            first_frame = false;
+            preview_session_id = None;
+            preview_refreshed_at = None;
+            continue;
+        }
+
+        if let Some(work_item) = pending_branch_names.pop_front() {
+            if let Some(branch_name) = branch_name_for_directory(&work_item.path) {
+                update_branch_name(&mut session_items, &work_item.session_id, branch_name);
+                pending_branch_status.push_back(work_item);
             }
-            StartupStage::BranchesReady => {
-                startup_stage = StartupStage::Interactive;
-                preview_session_id = None;
-                preview_refreshed_at = None;
-                continue;
+            continue;
+        }
+
+        if let Some(work_item) = pending_branch_status.pop_front() {
+            if let Some((sync, dirty)) = branch_status_for_directory(&work_item.path) {
+                update_branch_status(&mut session_items, &work_item.session_id, sync, dirty);
             }
-            StartupStage::Interactive => {}
+            continue;
         }
 
         if event::poll(Duration::from_millis(250))?
@@ -379,16 +388,7 @@ fn load_domain_state() -> Result<DomainState, Box<dyn Error>> {
     Ok(build_domain_state(&CandidateSources { tmux, zoxide }))
 }
 
-fn enrich_session_list_items(items: &mut [SessionListItem], state: &DomainState) {
-    let branches = git_branches_by_session(state);
-    for item in items {
-        item.git_branch = branches.get(&item.session_id).cloned();
-    }
-}
-
-fn git_branches_by_session(
-    state: &DomainState,
-) -> std::collections::BTreeMap<String, GitBranchStatus> {
+fn git_work_items(state: &DomainState) -> VecDeque<GitWorkItem> {
     state
         .sessions
         .iter()
@@ -398,13 +398,42 @@ fn git_branches_by_session(
                 .values()
                 .find(|window| window.active)
                 .or_else(|| session.windows.values().next())?;
-            let path = active_window.current_path.as_deref()?;
-            branch_status_for_directory(path).map(|branch| (session_id.clone(), branch))
+            let path = active_window.current_path.clone()?;
+            Some(GitWorkItem {
+                session_id: session_id.clone(),
+                path,
+            })
         })
         .collect()
 }
 
-fn branch_status_for_directory(path: &Path) -> Option<GitBranchStatus> {
+fn update_branch_name(items: &mut [SessionListItem], session_id: &str, branch_name: String) {
+    if let Some(item) = items.iter_mut().find(|item| item.session_id == session_id) {
+        item.git_branch = Some(GitBranchStatus {
+            name: branch_name,
+            sync: GitBranchSync::Unknown,
+            dirty: false,
+        });
+    }
+}
+
+fn update_branch_status(
+    items: &mut [SessionListItem],
+    session_id: &str,
+    sync: GitBranchSync,
+    dirty: bool,
+) {
+    if let Some(branch) = items
+        .iter_mut()
+        .find(|item| item.session_id == session_id)
+        .and_then(|item| item.git_branch.as_mut())
+    {
+        branch.sync = sync;
+        branch.dirty = dirty;
+    }
+}
+
+fn branch_status_for_directory(path: &Path) -> Option<(GitBranchSync, bool)> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)
@@ -416,17 +445,12 @@ fn branch_status_for_directory(path: &Path) -> Option<GitBranchStatus> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut branch_name = None;
     let mut upstream = None;
     let mut ahead = 0usize;
     let mut dirty = false;
 
     for line in stdout.lines() {
-        if let Some(head) = line.strip_prefix("# branch.head ") {
-            if head != "(detached)" {
-                branch_name = Some(head.to_string());
-            }
-        } else if let Some(remote) = line.strip_prefix("# branch.upstream ") {
+        if let Some(remote) = line.strip_prefix("# branch.upstream ") {
             upstream = Some(remote.to_string());
         } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
             let mut parts = ab.split_whitespace();
@@ -439,24 +463,49 @@ fn branch_status_for_directory(path: &Path) -> Option<GitBranchStatus> {
         }
     }
 
-    Some(GitBranchStatus {
-        name: branch_name.or_else(|| detached_head_name(path))?,
-        pushed: upstream.is_some() && ahead == 0,
-        dirty,
-    })
+    let sync = if upstream.is_none() || ahead > 0 {
+        GitBranchSync::NotPushed
+    } else {
+        GitBranchSync::Pushed
+    };
+
+    Some((sync, dirty))
 }
 
-fn detached_head_name(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+fn branch_name_for_directory(path: &Path) -> Option<String> {
+    path.ancestors().find_map(branch_name_for_git_root)
+}
+
+fn branch_name_for_git_root(path: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(path)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+
+    if let Some(reference) = head.strip_prefix("ref: ") {
+        return reference.rsplit('/').next().map(ToOwned::to_owned);
+    }
+
+    Some(head.chars().take(7).collect())
+}
+
+fn resolve_git_dir(path: &Path) -> Option<PathBuf> {
+    let dot_git = path.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+
+    if !dot_git.is_file() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let target = pointer.trim().strip_prefix("gitdir: ")?;
+    let git_dir = Path::new(target);
+    if git_dir.is_absolute() {
+        Some(git_dir.to_path_buf())
+    } else {
+        Some(path.join(git_dir))
+    }
 }
 
 fn filter_items(items: &[SessionListItem], query: &str) -> Vec<SessionListItem> {
