@@ -17,7 +17,14 @@ pub struct SessionListItem {
     pub active_window_label: Option<String>,
     pub path_hint: Option<String>,
     pub command_hint: Option<String>,
-    pub git_branch: Option<String>,
+    pub git_branch: Option<GitBranchStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBranchStatus {
+    pub name: String,
+    pub pushed: bool,
+    pub dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

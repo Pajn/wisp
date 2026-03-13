@@ -2,7 +2,8 @@ use std::{
     env,
     error::Error,
     io::stdout,
-    path::{Path, PathBuf},
+    path::Path,
+    process::Command,
     process::ExitCode,
     time::{Duration, Instant},
 };
@@ -17,7 +18,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use wisp_app::{CandidateSources, build_domain_state};
 use wisp_config::{CliOverrides, LoadOptions, load_config};
 use wisp_core::{
-    DomainState, PreviewKey, PreviewRequest, SessionListItem, derive_session_list,
+    DomainState, GitBranchStatus, PreviewKey, PreviewRequest, SessionListItem, derive_session_list,
     derive_status_items,
 };
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
@@ -360,7 +361,9 @@ fn session_list_items(state: &DomainState) -> Vec<SessionListItem> {
     items
 }
 
-fn git_branches_by_session(state: &DomainState) -> std::collections::BTreeMap<String, String> {
+fn git_branches_by_session(
+    state: &DomainState,
+) -> std::collections::BTreeMap<String, GitBranchStatus> {
     state
         .sessions
         .iter()
@@ -371,45 +374,64 @@ fn git_branches_by_session(state: &DomainState) -> std::collections::BTreeMap<St
                 .find(|window| window.active)
                 .or_else(|| session.windows.values().next())?;
             let path = active_window.current_path.as_deref()?;
-            branch_name_for_directory(path).map(|branch| (session_id.clone(), branch))
+            branch_status_for_directory(path).map(|branch| (session_id.clone(), branch))
         })
         .collect()
 }
 
-fn branch_name_for_directory(path: &Path) -> Option<String> {
-    path.ancestors().find_map(branch_name_for_git_root)
-}
-
-fn branch_name_for_git_root(path: &Path) -> Option<String> {
-    let git_dir = resolve_git_dir(path)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-
-    if let Some(reference) = head.strip_prefix("ref: ") {
-        return reference.rsplit('/').next().map(ToOwned::to_owned);
-    }
-
-    Some(head.chars().take(7).collect())
-}
-
-fn resolve_git_dir(path: &Path) -> Option<PathBuf> {
-    let dot_git = path.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git);
-    }
-
-    if !dot_git.is_file() {
+fn branch_status_for_directory(path: &Path) -> Option<GitBranchStatus> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["status", "--porcelain=2", "--branch"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
 
-    let pointer = std::fs::read_to_string(&dot_git).ok()?;
-    let target = pointer.trim().strip_prefix("gitdir: ")?;
-    let git_dir = Path::new(target);
-    if git_dir.is_absolute() {
-        Some(git_dir.to_path_buf())
-    } else {
-        Some(path.join(git_dir))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut branch_name = None;
+    let mut upstream = None;
+    let mut ahead = 0usize;
+    let mut dirty = false;
+
+    for line in stdout.lines() {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            if head != "(detached)" {
+                branch_name = Some(head.to_string());
+            }
+        } else if let Some(remote) = line.strip_prefix("# branch.upstream ") {
+            upstream = Some(remote.to_string());
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut parts = ab.split_whitespace();
+            let ahead_raw = parts.next().and_then(|part| part.strip_prefix('+'));
+            ahead = ahead_raw
+                .and_then(|part| part.parse::<usize>().ok())
+                .unwrap_or(0);
+        } else if !line.starts_with("# ") && !line.is_empty() {
+            dirty = true;
+        }
     }
+
+    Some(GitBranchStatus {
+        name: branch_name.or_else(|| detached_head_name(path))?,
+        pushed: upstream.is_some() && ahead == 0,
+        dirty,
+    })
+}
+
+fn detached_head_name(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn filter_items(items: &[SessionListItem], query: &str) -> Vec<SessionListItem> {

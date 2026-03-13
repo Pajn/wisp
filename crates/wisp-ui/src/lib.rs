@@ -7,7 +7,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
-use wisp_core::SessionListItem;
+use wisp_core::{GitBranchStatus, SessionListItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceKind {
@@ -163,11 +163,12 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
             .items
             .iter()
             .filter_map(|item| item.git_branch.as_ref())
-            .map(|branch| branch.chars().count())
+            .map(|branch| branch.name.chars().count())
             .max()
             .unwrap_or(0)
             .min(18)
     };
+    let dirty_width = if compact || branch_width == 0 { 0 } else { 1 };
     let marker_width = 3usize;
     let available_width = usize::from(area.width.saturating_sub(2));
     let gap_width = if compact { 0 } else { 2 };
@@ -184,7 +185,7 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
         let branch_space = if branch_width == 0 {
             0
         } else {
-            branch_width + gap_width
+            branch_width + dirty_width + gap_width
         };
         let title_budget = available_width
             .saturating_sub(marker_width + gap_width + branch_space)
@@ -212,13 +213,21 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
                 wisp_core::AttentionBadge::Bell => "!",
             };
             let icon = format!("{marker}{badge}");
-            let text = if compact {
-                format!("{icon} {}", truncate_text(&item.label, session_width))
+            let style = if index == model.selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let line = if compact {
+                Line::from(Span::styled(
+                    format!("{icon} {}", truncate_text(&item.label, session_width)),
+                    style,
+                ))
             } else {
                 let branch_space = if branch_width == 0 {
                     0
                 } else {
-                    branch_width + gap_width
+                    branch_width + dirty_width + gap_width
                 };
                 let title_width = available_width
                     .saturating_sub(marker_width + session_width + gap_width + branch_space);
@@ -230,29 +239,31 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
                     ),
                     title_width,
                 );
-                let branch = item
-                    .git_branch
-                    .as_deref()
-                    .map(|value| truncate_left(value, branch_width))
-                    .unwrap_or_default();
-
-                if branch_width == 0 {
+                let prefix = if branch_width == 0 {
                     format!("{icon} {session}  {title}")
                 } else {
-                    format!(
-                        "{icon} {session}  {title}  {}",
-                        pad_left(&branch, branch_width)
-                    )
+                    format!("{icon} {session}  {title}  ")
+                };
+
+                let mut spans = vec![Span::styled(prefix, style)];
+                if branch_width > 0 {
+                    if let Some(branch) = item.git_branch.as_ref() {
+                        spans.push(Span::styled(
+                            pad_left(&truncate_left(&branch.name, branch_width), branch_width),
+                            style.patch(branch_style(branch)),
+                        ));
+                        spans.push(Span::styled(
+                            if branch.dirty { "*" } else { " " },
+                            style.patch(Style::default().fg(Color::Yellow)),
+                        ));
+                    } else {
+                        spans.push(Span::styled(" ".repeat(branch_width + dirty_width), style));
+                    }
                 }
+                Line::from(spans)
             };
 
-            let style = if index == model.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-
-            ListItem::new(Line::from(Span::styled(text, style)))
+            ListItem::new(line)
         })
         .collect::<Vec<_>>();
 
@@ -341,6 +352,15 @@ fn truncate_left(value: &str, width: usize) -> String {
             .iter()
             .collect::<String>()
     )
+}
+
+fn branch_style(branch: &GitBranchStatus) -> Style {
+    let color = if branch.pushed {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    Style::default().fg(color)
 }
 
 fn ansi_preview_text(preview: &[String]) -> Text<'static> {
