@@ -314,7 +314,7 @@ fn uninstall_statusline_refresh_hooks(tmux: &impl TmuxClient) -> Result<(), Tmux
 
 fn status_format_options(config: &ResolvedConfig) -> StatusFormatOptions {
     StatusFormatOptions {
-        prefix: "Wisp".to_string(),
+        icon: config.status.icon.clone(),
         max_sessions: config.status.max_sessions,
         show_previous: config.status.show_previous,
         show_counts: false,
@@ -1662,6 +1662,9 @@ mod tests {
                 index: 2,
                 name: "logs".to_string(),
                 active: true,
+                activity: false,
+                bell: false,
+                silence: false,
                 current_path: None,
                 current_command: None,
             }]);

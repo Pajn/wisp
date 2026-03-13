@@ -64,6 +64,7 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | --- | --- | --- | --- | --- |
 | `line` | integer | `2` | `> 0` | tmux status row used by `wisp statusline install`. |
 | `interactive` | bool | `true` | `true`, `false` | Enables clickable session ranges when tmux 3.4+ mouse ranges are available and mouse mode is on. |
+| `icon` | string | `"󰖔"` | any string | Leading status label. Set it to `""` to hide it or `"Wisp"` to render text instead. |
 | `max_sessions` | integer | unset | `> 0` when set | Optional cap on the number of session tokens rendered in the status strip. If omitted, Wisp renders every session and lets tmux truncate to the available width. |
 | `show_previous` | bool | `true` | `true`, `false` | Shows the previous-session marker around the last visited session. |
 
@@ -152,6 +153,7 @@ popup_height = "85%"
 [status]
 line = 2
 interactive = true
+icon = "󰖔"
 show_previous = true
 
 [zoxide]

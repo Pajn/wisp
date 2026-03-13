@@ -39,5 +39,5 @@ fn statusline_render_command_prints_status_output() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Wisp"));
+    assert!(stdout.contains("󰖔"));
 }

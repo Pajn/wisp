@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use wisp_config::{ResolvedConfig, UiMode};
 use wisp_core::{
-    Candidate, CandidateId, ClientFocus, DirectoryRecord, DomainState, PaneRecord, PreviewContent,
-    PreviewKey, PreviewRequest, ResolvedAction, SessionRecord, SessionSortKey, WindowRecord,
-    deduplicate_candidates, derive_candidates, preview_request_for_candidate, resolve_action,
-    sort_candidates,
+    AlertState, Candidate, CandidateId, ClientFocus, DirectoryRecord, DomainState, PaneRecord,
+    PreviewContent, PreviewKey, PreviewRequest, ResolvedAction, SessionRecord, SessionSortKey,
+    WindowRecord, deduplicate_candidates, derive_candidates, preview_request_for_candidate,
+    resolve_action, sort_candidates,
 };
 use wisp_tmux::TmuxSnapshot;
 use wisp_zoxide::DirectoryEntry;
@@ -320,7 +320,12 @@ pub fn build_domain_state(sources: &CandidateSources) -> DomainState {
                                     is_active: window.active,
                                 },
                             )]),
-                            alerts: Default::default(),
+                            alerts: AlertState {
+                                activity: window.activity,
+                                bell: window.bell,
+                                silence: window.silence,
+                                unseen_output: false,
+                            },
                             has_unseen: false,
                             current_path: window.current_path.clone(),
                             active_command: window.current_command.clone(),
@@ -390,13 +395,17 @@ mod tests {
     use std::path::PathBuf;
 
     use wisp_config::ResolvedConfig;
-    use wisp_core::{Candidate, DirectoryMetadata, PreviewContent, PreviewKey, SessionMetadata};
-    use wisp_tmux::{TmuxCapabilities, TmuxContext, TmuxSession, TmuxSnapshot, TmuxVersion};
+    use wisp_core::{
+        AttentionBadge, Candidate, DirectoryMetadata, PreviewContent, PreviewKey, SessionMetadata,
+    };
+    use wisp_tmux::{
+        TmuxCapabilities, TmuxContext, TmuxSession, TmuxSnapshot, TmuxVersion, TmuxWindow,
+    };
     use wisp_zoxide::DirectoryEntry;
 
     use crate::{
         AppCommand, AppMode, AppState, CandidateBuildOptions, CandidateSources, StatusLevel,
-        UserIntent, rebuild_candidates,
+        UserIntent, build_domain_state, rebuild_candidates,
     };
 
     #[test]
@@ -466,6 +475,56 @@ mod tests {
         let command = state.handle_intent(UserIntent::ConfirmSelection);
 
         assert!(matches!(command, Some(AppCommand::ExecuteAction(_))));
+    }
+
+    #[test]
+    fn build_domain_state_preserves_tmux_alert_flags() {
+        let state = build_domain_state(&CandidateSources {
+            tmux: TmuxSnapshot {
+                context: TmuxContext {
+                    session_name: Some("alpha".to_string()),
+                    window_index: Some(1),
+                    ..TmuxContext::default()
+                },
+                capabilities: TmuxCapabilities {
+                    version: TmuxVersion {
+                        major: 3,
+                        minor: 6,
+                        patch: None,
+                    },
+                    supports_popup: true,
+                    supports_multi_status_lines: true,
+                    supports_status_mouse_ranges: true,
+                    mouse_enabled: true,
+                },
+                sessions: vec![TmuxSession {
+                    id: "$1".to_string(),
+                    name: "alpha".to_string(),
+                    attached: true,
+                    windows: 1,
+                    current: true,
+                    last_activity: Some(10),
+                }],
+                windows: vec![TmuxWindow {
+                    session_name: "alpha".to_string(),
+                    index: 1,
+                    name: "shell".to_string(),
+                    active: true,
+                    activity: false,
+                    bell: true,
+                    silence: false,
+                    current_path: Some(PathBuf::from("/tmp")),
+                    current_command: Some("bash".to_string()),
+                }],
+            },
+            zoxide: Vec::new(),
+        });
+
+        assert_eq!(
+            state.sessions["alpha"].aggregate_alerts.highest_priority,
+            AttentionBadge::Bell
+        );
+        assert!(state.sessions["alpha"].aggregate_alerts.any_bell);
     }
 
     #[test]

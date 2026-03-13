@@ -44,6 +44,7 @@ impl Default for ResolvedConfig {
             status: StatusConfig {
                 line: 2,
                 interactive: true,
+                icon: "󰖔".to_string(),
                 max_sessions: None,
                 show_previous: true,
             },
@@ -115,6 +116,7 @@ pub struct TmuxConfig {
 pub struct StatusConfig {
     pub line: usize,
     pub interactive: bool,
+    pub icon: String,
     pub max_sessions: Option<usize>,
     pub show_previous: bool,
 }
@@ -668,6 +670,9 @@ impl PartialConfig {
         if let Some(interactive) = self.status.interactive {
             config.status.interactive = interactive;
         }
+        if let Some(icon) = self.status.icon {
+            config.status.icon = icon;
+        }
         config.status.max_sessions = self.status.max_sessions;
         if let Some(show_previous) = self.status.show_previous {
             config.status.show_previous = show_previous;
@@ -824,6 +829,7 @@ impl PartialTmuxConfig {
 struct PartialStatusConfig {
     line: Option<usize>,
     interactive: Option<bool>,
+    icon: Option<String>,
     max_sessions: Option<usize>,
     show_previous: Option<bool>,
 }
@@ -832,6 +838,7 @@ impl PartialStatusConfig {
     fn merge(&mut self, other: Self) {
         merge_option(&mut self.line, other.line);
         merge_option(&mut self.interactive, other.interactive);
+        merge_option(&mut self.icon, other.icon);
         merge_option(&mut self.max_sessions, other.max_sessions);
         merge_option(&mut self.show_previous, other.show_previous);
     }
@@ -1030,6 +1037,7 @@ mod tests {
         assert_eq!(config.ui.session_sort, SessionSortMode::Recent);
         assert_eq!(config.status.line, 2);
         assert!(config.status.interactive);
+        assert_eq!(config.status.icon, "󰖔");
         assert_eq!(config.status.max_sessions, None);
         assert_eq!(config.actions.down, KeyAction::MoveDown);
         assert_eq!(config.actions.up, KeyAction::MoveUp);
@@ -1060,6 +1068,7 @@ mod tests {
 
             [status]
             line = 3
+            icon = "Wisp"
             max_sessions = 5
             show_previous = false
 
@@ -1089,6 +1098,7 @@ mod tests {
         assert_eq!(config.ui.session_sort, SessionSortMode::Alphabetical);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Skim);
         assert_eq!(config.status.line, 3);
+        assert_eq!(config.status.icon, "Wisp");
         assert_eq!(config.status.max_sessions, Some(5));
         assert!(!config.status.show_previous);
         assert_eq!(config.actions.down, KeyAction::MoveDown);

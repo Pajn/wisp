@@ -2,7 +2,7 @@ use wisp_core::{AttentionBadge, StatusSessionItem};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusFormatOptions {
-    pub prefix: String,
+    pub icon: String,
     pub max_sessions: Option<usize>,
     pub show_previous: bool,
     pub show_counts: bool,
@@ -11,7 +11,7 @@ pub struct StatusFormatOptions {
 impl Default for StatusFormatOptions {
     fn default() -> Self {
         Self {
-            prefix: "Wisp".to_string(),
+            icon: "󰖔".to_string(),
             max_sessions: None,
             show_previous: true,
             show_counts: false,
@@ -94,7 +94,10 @@ pub fn build_status_segments(
     items: &[StatusSessionItem],
     options: &StatusFormatOptions,
 ) -> Vec<StatusSegment> {
-    let mut segments = vec![StatusSegment::passive(escape_tmux_status(&options.prefix))];
+    let mut segments = Vec::new();
+    if !options.icon.is_empty() {
+        segments.push(StatusSegment::passive(escape_tmux_status(&options.icon)));
+    }
     segments.extend(
         visible_items(items, options.max_sessions)
             .into_iter()
@@ -215,7 +218,7 @@ mod tests {
             &StatusFormatOptions::default(),
         );
 
-        assert_eq!(line, "Wisp   main•  ‹api›##   ops !");
+        assert_eq!(line, "󰖔   main•  ‹api›##   ops !");
     }
 
     #[test]
@@ -286,7 +289,7 @@ mod tests {
 
         assert_eq!(
             rendered.text,
-            "Wisp  #[range=session|$1] alpha•#[norange]  #[range=session|$2] beta #[norange]"
+            "󰖔  #[range=session|$1] alpha•#[norange]  #[range=session|$2] beta #[norange]"
         );
         assert!(rendered.interactive);
     }
@@ -302,7 +305,7 @@ mod tests {
                 &StatusFormatOptions::default(),
                 StatusRenderMode::Passive
             ),
-            Some("Wisp   main•".to_string())
+            Some("󰖔   main•".to_string())
         );
         assert_eq!(
             state.next_update(
@@ -318,7 +321,33 @@ mod tests {
                 &StatusFormatOptions::default(),
                 StatusRenderMode::Clickable
             ),
-            Some("Wisp  #[range=session|$1] main•#[norange]".to_string())
+            Some("󰖔  #[range=session|$1] main•#[norange]".to_string())
+        );
+    }
+
+    #[test]
+    fn allows_overriding_icon_with_text_or_empty_string() {
+        let items = [session("$1", "main", true, false, AttentionBadge::None)];
+
+        assert_eq!(
+            format_status_line(
+                &items,
+                &StatusFormatOptions {
+                    icon: "Wisp".to_string(),
+                    ..StatusFormatOptions::default()
+                }
+            ),
+            "Wisp   main•"
+        );
+        assert_eq!(
+            format_status_line(
+                &items,
+                &StatusFormatOptions {
+                    icon: String::new(),
+                    ..StatusFormatOptions::default()
+                }
+            ),
+            " main•"
         );
     }
 }

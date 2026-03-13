@@ -81,6 +81,8 @@ To remove it again, run `wisp statusline uninstall`.
 
 By default the statusline renders every session in stable alphabetical order, and
 tmux truncates the final row if the screen is narrower than the rendered strip.
+The leading status label defaults to the Nerd Font icon `󰖔` and can be
+overridden with `[status].icon`, including plain text like `"Wisp"` or `""`.
 
 The picker and sidebar default to a recent-session order so the active session
 stays first and the previously visited session stays near the top. Press `Ctrl-S`

@@ -81,6 +81,9 @@ pub struct TmuxWindow {
     pub index: u32,
     pub name: String,
     pub active: bool,
+    pub activity: bool,
+    pub bell: bool,
+    pub silence: bool,
     pub current_path: Option<PathBuf>,
     pub current_command: Option<String>,
 }
@@ -472,7 +475,7 @@ impl TmuxClient for CommandTmuxClient {
             "list-windows".to_string(),
             "-a".to_string(),
             "-F".to_string(),
-            "#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_current_path}\t#{pane_current_command}".to_string(),
+            "#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_activity_flag}\t#{window_bell_flag}\t#{window_silence_flag}\t#{pane_current_path}\t#{pane_current_command}".to_string(),
         ]) {
             Ok(output) => output,
             Err(TmuxError::CommandFailed { stderr, .. }) if is_no_server_error(&stderr) => {
@@ -1025,6 +1028,11 @@ fn parse_windows(output: &str) -> Result<Vec<TmuxWindow>, TmuxError> {
                 })?;
             let name = required_field(fields.next(), "window name", line)?;
             let active = parse_numeric_bool(required_field(fields.next(), "window active", line)?)?;
+            let activity =
+                parse_numeric_bool(required_field(fields.next(), "window activity", line)?)?;
+            let bell = parse_numeric_bool(required_field(fields.next(), "window bell", line)?)?;
+            let silence =
+                parse_numeric_bool(required_field(fields.next(), "window silence", line)?)?;
             let current_path = empty_to_none(fields.next()).map(PathBuf::from);
             let current_command = empty_to_none(fields.next());
 
@@ -1033,6 +1041,9 @@ fn parse_windows(output: &str) -> Result<Vec<TmuxWindow>, TmuxError> {
                 index,
                 name: name.to_string(),
                 active,
+                activity,
+                bell,
+                silence,
                 current_path,
                 current_command,
             })
@@ -1137,9 +1148,9 @@ mod tests {
         SidebarSide, TmuxBackend, TmuxContext, TmuxEvent, TmuxPane, TmuxSession, TmuxSnapshot,
         TmuxVersion, TmuxWindow, clear_hook_command, clear_status_line_command, diff_snapshots,
         focus_session_command, format_popup_command, parse_panes, parse_sessions,
-        parse_status_line_count, refresh_client_status_command, resize_pane_width_command,
-        select_pane_command, select_pane_title_command, set_hook_command, sidebar_pane_command,
-        status_line_command, status_line_count_command,
+        parse_status_line_count, parse_windows, refresh_client_status_command,
+        resize_pane_width_command, select_pane_command, select_pane_title_command,
+        set_hook_command, sidebar_pane_command, status_line_command, status_line_count_command,
     };
 
     #[test]
@@ -1233,6 +1244,27 @@ mod tests {
                 title: "Wisp Sidebar".to_string(),
                 active: true,
                 current_command: Some("wisp".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_tmux_windows_with_alert_flags() {
+        let windows = parse_windows("alpha\t1\tshell\t1\t1\t0\t1\t/tmp\tbash\n")
+            .expect("windows should parse");
+
+        assert_eq!(
+            windows,
+            vec![TmuxWindow {
+                session_name: "alpha".to_string(),
+                index: 1,
+                name: "shell".to_string(),
+                active: true,
+                activity: true,
+                bell: false,
+                silence: true,
+                current_path: Some(PathBuf::from("/tmp")),
+                current_command: Some("bash".to_string()),
             }]
         );
     }
@@ -1366,6 +1398,9 @@ mod tests {
                 index: 1,
                 name: "shell".to_string(),
                 active: true,
+                activity: false,
+                bell: false,
+                silence: false,
                 current_path: None,
                 current_command: None,
             }],

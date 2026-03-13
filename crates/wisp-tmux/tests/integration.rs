@@ -142,6 +142,60 @@ fn snapshots_include_capability_information() {
 }
 
 #[test]
+fn lists_window_activity_flags_from_an_isolated_server() {
+    let harness = TmuxHarness::new();
+    harness.seed_session("alpha");
+
+    let create_status = harness
+        .run([
+            "new-window",
+            "-d",
+            "-t",
+            "alpha",
+            "-n",
+            "alerts",
+            "-c",
+            &harness.root.display().to_string(),
+            "sleep 5",
+        ])
+        .status
+        .code()
+        .expect("new-window exit status");
+    assert_eq!(create_status, 0, "alert window should be created");
+
+    let monitor_status = harness
+        .run(["set-option", "-t", "alpha:alerts", "monitor-activity", "on"])
+        .status
+        .code()
+        .expect("set-option exit status");
+    assert_eq!(monitor_status, 0, "monitor-activity should be enabled");
+
+    let send_status = harness
+        .run([
+            "send-keys",
+            "-t",
+            "alpha:alerts",
+            "printf 'hello\\n'",
+            "C-m",
+        ])
+        .status
+        .code()
+        .expect("send-keys exit status");
+    assert_eq!(send_status, 0, "activity command should be sent");
+    thread::sleep(Duration::from_millis(200));
+
+    let windows = harness.client().list_windows().expect("list tmux windows");
+    let alert_window = windows
+        .iter()
+        .find(|window| window.session_name == "alpha" && window.name == "alerts")
+        .expect("alert window should exist");
+
+    assert!(alert_window.activity);
+    assert!(!alert_window.bell);
+    assert!(!alert_window.silence);
+}
+
+#[test]
 fn captures_active_pane_from_selected_session() {
     let harness = TmuxHarness::new();
     let status = harness

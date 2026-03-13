@@ -52,6 +52,9 @@ line = 2
 # Enable clickable session ranges when tmux 3.4+ and mouse mode are available.
 interactive = true
 
+# Leading status label. Set to "" to hide it or "Wisp" to restore text.
+icon = "󰖔"
+
 # Maximum number of sessions rendered into the status strip.
 # Omit this to render every session and let tmux truncate if needed.
 # max_sessions = 8
