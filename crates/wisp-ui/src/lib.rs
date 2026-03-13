@@ -51,16 +51,28 @@ pub fn render_surface(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
 #[must_use]
 pub fn translate_key(key: KeyEvent) -> Option<UiIntent> {
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') => Some(UiIntent::SelectNext),
-        KeyCode::Up | KeyCode::Char('k') => Some(UiIntent::SelectPrev),
+        KeyCode::Down => Some(UiIntent::SelectNext),
+        KeyCode::Up => Some(UiIntent::SelectPrev),
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiIntent::SelectNext)
+        }
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiIntent::SelectPrev)
+        }
         KeyCode::Enter => Some(UiIntent::ActivateSelected),
-        KeyCode::Esc | KeyCode::Char('q') => Some(UiIntent::Close),
+        KeyCode::Esc => Some(UiIntent::Close),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiIntent::Close)
         }
-        KeyCode::Char('p') => Some(UiIntent::TogglePreview),
-        KeyCode::Char('d') => Some(UiIntent::ToggleDetails),
-        KeyCode::Char('m') => Some(UiIntent::ToggleCompactSidebar),
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiIntent::TogglePreview)
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiIntent::ToggleDetails)
+        }
+        KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiIntent::ToggleCompactSidebar)
+        }
         KeyCode::Backspace => Some(UiIntent::Backspace),
         KeyCode::Char(character)
             if !key
@@ -191,9 +203,9 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
 
 fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     let text = if model.show_help {
-        "j/k move  enter open  p preview  d details  m compact  q close"
+        "up/down or ^j/^k move  enter open  ^p preview  ^d details  ^m compact  esc close"
     } else {
-        "q close"
+        "esc close"
     };
 
     Paragraph::new(text)
@@ -283,8 +295,20 @@ mod tests {
             Some(UiIntent::SelectNext)
         );
         assert_eq!(
-            translate_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+            translate_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            Some(UiIntent::SelectNext)
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
             Some(UiIntent::ToggleDetails)
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            Some(UiIntent::TogglePreview)
+        );
+        assert_eq!(
+            translate_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(UiIntent::FilterChanged("q".to_string()))
         );
         assert_eq!(
             translate_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
