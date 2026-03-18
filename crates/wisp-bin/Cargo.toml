@@ -8,6 +8,7 @@ name = "wisp"
 path = "src/main.rs"
 
 [dependencies]
+argh = "0.1"
 crossterm.workspace = true
 ratatui.workspace = true
 wisp-app = { path = "../wisp-app" }
