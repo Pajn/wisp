@@ -21,6 +21,23 @@ pub struct SessionListItem {
     pub git_branch: Option<GitBranchStatus>,
 }
 
+impl SessionListItem {
+    #[must_use]
+    pub fn picker_search_text(&self) -> String {
+        [
+            Some(self.label.as_str()),
+            self.active_window_label.as_deref(),
+            self.command_hint.as_deref(),
+            self.git_branch.as_ref().map(|branch| branch.name.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitBranchStatus {
     pub name: String,
@@ -182,9 +199,10 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use crate::{
-        AlertAggregate, AttentionBadge, ClientFocus, DirectoryRecord, DomainState, SessionListItem,
-        SessionListSortMode, SessionRecord, SessionSortKey, WindowRecord, derive_candidates,
-        derive_session_list, derive_status_items, sort_session_list_items,
+        AlertAggregate, AttentionBadge, ClientFocus, DirectoryRecord, DomainState, GitBranchStatus,
+        GitBranchSync, SessionListItem, SessionListSortMode, SessionRecord, SessionSortKey,
+        WindowRecord, derive_candidates, derive_session_list, derive_status_items,
+        sort_session_list_items,
     };
 
     fn seeded_state() -> DomainState {
@@ -382,6 +400,33 @@ mod tests {
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
             vec!["aardvark", "alpha", "beta"]
+        );
+    }
+
+    #[test]
+    fn picker_search_text_includes_git_branch_name() {
+        let item = SessionListItem {
+            session_id: "alpha".to_string(),
+            label: "alpha".to_string(),
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: Some("editor".to_string()),
+            path_hint: None,
+            command_hint: Some("nvim".to_string()),
+            git_branch: Some(GitBranchStatus {
+                name: "feature/picker-branches".to_string(),
+                sync: GitBranchSync::Unknown,
+                dirty: false,
+            }),
+        };
+
+        assert_eq!(
+            item.picker_search_text(),
+            "alpha editor nvim feature/picker-branches"
         );
     }
 }

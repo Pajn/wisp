@@ -1355,12 +1355,7 @@ fn filter_items(items: &[SessionListItem], query: &str) -> Vec<SessionListItem> 
                 id: item.session_id.clone(),
                 primary_text: item.label.clone(),
                 secondary_text: item.active_window_label.clone(),
-                search_text: format!(
-                    "{} {} {}",
-                    item.label,
-                    item.active_window_label.clone().unwrap_or_default(),
-                    item.command_hint.clone().unwrap_or_default()
-                ),
+                search_text: item.picker_search_text(),
             })
             .collect(),
     );
@@ -1402,7 +1397,7 @@ mod tests {
         SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, STATUSLINE_REFRESH_COMMAND,
         STATUSLINE_REFRESH_HOOKS, SidebarRuntime, StatuslineCommand, SurfaceKind,
         activate_filter_selection, apply_session_sort, clear_sidebar_ui_state,
-        create_session_from_query, current_session_id, disable_sidebar_for_session,
+        create_session_from_query, current_session_id, disable_sidebar_for_session, filter_items,
         install_statusline_refresh_hooks, load_sidebar_ui_state, parse_statusline_command,
         persist_sidebar_ui_state, picker_bindings, reconcile_sidebar_for_current_context,
         selected_index_for_session, sidebar_requires_handoff, sidebar_state_path,
@@ -2067,6 +2062,21 @@ mod tests {
             selected_index_for_session(&items, "", Some("alpha")),
             Some(1)
         );
+    }
+
+    #[test]
+    fn filter_items_matches_git_branch_names() {
+        let mut item = session_item("alpha");
+        item.git_branch = Some(wisp_core::GitBranchStatus {
+            name: "feature/picker-branches".to_string(),
+            sync: wisp_core::GitBranchSync::Unknown,
+            dirty: false,
+        });
+
+        let filtered = filter_items(&[item], "picker-branches");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "alpha");
     }
 
     fn session_item(session_id: &str) -> wisp_core::SessionListItem {
