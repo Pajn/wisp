@@ -6,13 +6,14 @@ use std::{
     fs,
     io::stdout,
     path::{Path, PathBuf},
-    process::Command,
+    process::Command as ProcessCommand,
     process::ExitCode,
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
+use argh::{FromArgValue, FromArgs};
 use crossterm::{
     event::{self, Event},
     execute,
@@ -48,6 +49,135 @@ const STATUSLINE_REFRESH_HOOKS: &[&str] = &[
     "session-renamed[200]",
 ];
 const STATUSLINE_REFRESH_COMMAND: &str = "refresh-client -S";
+
+#[derive(Debug, FromArgs, PartialEq)]
+/// Wisp is a tmux navigation workspace.
+///
+/// Run `wisp help` to list available commands.
+#[argh(help_triggers("-h", "--help", "help"))]
+struct Cli {
+    #[argh(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand)]
+enum Command {
+    Doctor(DoctorCommand),
+    PrintConfig(PrintConfigCommand),
+    Fullscreen(FullscreenCommand),
+    Popup(PopupCommandCli),
+    SidebarPopup(SidebarPopupCommand),
+    SidebarPane(SidebarPaneCommand),
+    Statusline(StatuslineGroupCommand),
+}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "doctor")]
+/// Print runtime diagnostics for tmux and zoxide.
+struct DoctorCommand {}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "print-config")]
+/// Print the resolved configuration.
+struct PrintConfigCommand {}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "fullscreen")]
+/// Open the main picker fullscreen in tmux.
+struct FullscreenCommand {}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "popup")]
+/// Open the main picker in a tmux popup.
+struct PopupCommandCli {}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "sidebar-popup")]
+/// Open the sidebar picker in a tmux popup.
+struct SidebarPopupCommand {}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "sidebar-pane")]
+/// Open the sidebar picker in a persistent tmux pane.
+struct SidebarPaneCommand {}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "statusline")]
+/// Manage the tmux statusline integration.
+struct StatuslineGroupCommand {
+    #[argh(subcommand)]
+    command: StatuslineSubcommand,
+}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand)]
+enum StatuslineSubcommand {
+    Install(StatuslineInstallCommand),
+    Render(StatuslineRenderCommand),
+    Uninstall(StatuslineUninstallCommand),
+}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "install")]
+/// Install the Wisp tmux statusline.
+struct StatuslineInstallCommand {
+    /// tmux status row to install into.
+    #[argh(option)]
+    line: Option<usize>,
+}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "render")]
+/// Render the Wisp tmux statusline.
+struct StatuslineRenderCommand {
+    /// force passive rendering.
+    #[argh(switch)]
+    force_passive: bool,
+
+    /// force clickable rendering.
+    #[argh(switch)]
+    force_clickable: bool,
+}
+
+#[derive(Debug, FromArgs, PartialEq)]
+#[argh(subcommand, name = "uninstall")]
+/// Remove the Wisp tmux statusline.
+struct StatuslineUninstallCommand {
+    /// tmux status row to remove from.
+    #[argh(option)]
+    line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiMode {
+    Picker,
+    SidebarCompact,
+    SidebarExpanded,
+}
+
+impl FromArgValue for UiMode {
+    fn from_arg_value(value: &str) -> Result<Self, String> {
+        match value {
+            "picker" => Ok(Self::Picker),
+            "sidebar-compact" => Ok(Self::SidebarCompact),
+            "sidebar-expanded" => Ok(Self::SidebarExpanded),
+            other => Err(format!(
+                "expected one of \"picker\", \"sidebar-compact\", or \"sidebar-expanded\", got `{other}`"
+            )),
+        }
+    }
+}
+
+impl UiMode {
+    fn surface_kind(self) -> SurfaceKind {
+        match self {
+            Self::Picker => SurfaceKind::Picker,
+            Self::SidebarCompact => SurfaceKind::SidebarCompact,
+            Self::SidebarExpanded => SurfaceKind::SidebarExpanded,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewMode {
@@ -92,13 +222,6 @@ struct SidebarRuntime {
     pane_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatuslineCommand {
-    Install { line: Option<usize> },
-    Render { force: Option<StatusRenderMode> },
-    Uninstall { line: Option<usize> },
-}
-
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -110,42 +233,135 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    match parse_cli() {
+        Ok(cli) => execute_cli(cli),
+        Err(early_exit) => {
+            if early_exit.status.is_ok() {
+                print!("{}", early_exit.output);
+                Ok(())
+            } else {
+                Err(early_exit.output.into())
+            }
+        }
+    }
+}
+
+enum ParsedCli {
+    Public(Cli),
+    Ui(UiMode),
+}
+
+fn ui_help_early_exit(command_name: &str) -> argh::EarlyExit {
+    argh::EarlyExit {
+        output: format!(
+            "Usage: {command_name} ui <mode>\n\n    Internal helper for launching a specific surface.\n\n    Modes:\n      picker             Open the picker surface.\n      sidebar-compact    Open the compact sidebar surface.\n      sidebar-expanded   Open the expanded sidebar surface.\n"
+        ),
+        status: Ok(()),
+    }
+}
+
+fn parse_cli_args(args: &[String]) -> Result<ParsedCli, argh::EarlyExit> {
+    let command_name = command_name(&args[0]);
+    let mut cli_args = args.iter().skip(1).cloned().collect::<Vec<_>>();
+
+    if matches!(cli_args.first().map(String::as_str), Some("ui")) {
+        match cli_args.get(1).map(String::as_str) {
+            None => return Err(ui_help_early_exit(&command_name)),
+            Some("-h") | Some("--help") | Some("help") => {
+                return Err(ui_help_early_exit(&command_name));
+            }
+            Some(mode) => {
+                if cli_args.len() > 2 {
+                    return Err(ui_parse_error(
+                        "ui accepts exactly one surface mode: picker, sidebar-compact, or sidebar-expanded",
+                    ));
+                }
+
+                let mode = UiMode::from_arg_value(mode).map_err(ui_parse_error)?;
+                return Ok(ParsedCli::Ui(mode));
+            }
+        }
+    }
+
+    if cli_args.first().is_some_and(|arg| arg == "status-line")
+        && let Some(command) = cli_args.first_mut()
+    {
+        *command = "statusline".to_string();
+    }
+
+    if cli_args.is_empty() {
+        cli_args.push("help".to_string());
+    }
+
+    let command_name = [command_name.as_str()];
+    let cli_args = cli_args.iter().map(String::as_str).collect::<Vec<_>>();
+    Cli::from_args(&command_name, &cli_args).map(ParsedCli::Public)
+}
+
+fn parse_cli() -> Result<ParsedCli, argh::EarlyExit> {
     let args = env::args().collect::<Vec<_>>();
-    let command = args.get(1).cloned().unwrap_or_else(|| "popup".to_string());
-    let config = load_config(&LoadOptions {
+    parse_cli_args(&args)
+}
+
+fn command_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or("wisp")
+        .to_string()
+}
+
+fn ui_parse_error(message: impl Into<String>) -> argh::EarlyExit {
+    argh::EarlyExit {
+        output: format!("{}\n", message.into()),
+        status: Err(()),
+    }
+}
+
+fn execute_cli(cli: ParsedCli) -> Result<(), Box<dyn Error>> {
+    match cli {
+        ParsedCli::Ui(mode) => {
+            let config = load_runtime_config()?;
+            run_surface(mode.surface_kind(), &config)
+        }
+        ParsedCli::Public(cli) => match cli.command {
+            Command::Doctor(_) => {
+                doctor();
+                Ok(())
+            }
+            Command::PrintConfig(_) => {
+                let config = load_runtime_config()?;
+                println!("{config:#?}");
+                Ok(())
+            }
+            Command::Fullscreen(_) => {
+                let config = load_runtime_config()?;
+                run_surface(SurfaceKind::Picker, &config)
+            }
+            Command::Popup(_) => {
+                let config = load_runtime_config()?;
+                open_popup_or_run_inline(SurfaceKind::Picker, &config)
+            }
+            Command::SidebarPopup(_) => {
+                let config = load_runtime_config()?;
+                open_sidebar_popup_or_run_inline(&config)
+            }
+            Command::SidebarPane(_) => open_sidebar_pane(),
+            Command::Statusline(statusline) => {
+                validate_statusline_flags(&statusline)?;
+                let config = load_runtime_config()?;
+                run_statusline_group(&config, statusline)
+            }
+        },
+    }
+}
+
+fn load_runtime_config() -> Result<ResolvedConfig, Box<dyn Error>> {
+    load_config(&LoadOptions {
         cli_overrides: CliOverrides::default(),
         ..LoadOptions::default()
-    })?;
-
-    match command.as_str() {
-        "print-config" => {
-            println!("{config:#?}");
-            Ok(())
-        }
-        "doctor" => {
-            doctor();
-            Ok(())
-        }
-        "status-line" => run_statusline_command(&config, StatuslineCommand::Install { line: None }),
-        "statusline" => {
-            let status_command = parse_statusline_command(&args[2..])?;
-            run_statusline_command(&config, status_command)
-        }
-        "fullscreen" => run_surface(SurfaceKind::Picker, &config),
-        "popup" => open_popup_or_run_inline(SurfaceKind::Picker, &config),
-        "sidebar-popup" => open_sidebar_popup_or_run_inline(&config),
-        "sidebar-pane" => open_sidebar_pane(),
-        "ui" => {
-            let inline = env::args().nth(2).unwrap_or_else(|| "picker".to_string());
-            let kind = match inline.as_str() {
-                "sidebar-compact" => SurfaceKind::SidebarCompact,
-                "sidebar-expanded" => SurfaceKind::SidebarExpanded,
-                _ => SurfaceKind::Picker,
-            };
-            run_surface(kind, &config)
-        }
-        _ => run_surface(SurfaceKind::Picker, &config),
-    }
+    })
+    .map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
 fn doctor() {
@@ -177,66 +393,47 @@ fn doctor() {
     println!("event strategy: {:?}", backend.event_strategy());
 }
 
-fn parse_statusline_command(args: &[String]) -> Result<StatuslineCommand, Box<dyn Error>> {
-    let mut positionals = Vec::new();
-    let mut force = None;
-    let mut line = None;
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--force-passive" => force = Some(StatusRenderMode::Passive),
-            "--force-clickable" => force = Some(StatusRenderMode::Clickable),
-            "--line" => {
-                let raw = args
-                    .get(index + 1)
-                    .ok_or_else(|| "missing value for --line".to_string())?;
-                line = Some(raw.parse::<usize>()?);
-                index += 1;
+fn validate_statusline_flags(statusline: &StatuslineGroupCommand) -> Result<(), Box<dyn Error>> {
+    match &statusline.command {
+        StatuslineSubcommand::Install(args) => {
+            if args.line == Some(0) {
+                return Err("statusline line must be >= 1".into());
             }
-            value if value.starts_with("--") => {
-                return Err(format!("unsupported statusline flag `{value}`").into());
-            }
-            value => positionals.push(value.to_string()),
         }
-        index += 1;
+        StatuslineSubcommand::Uninstall(args) => {
+            if args.line == Some(0) {
+                return Err("statusline line must be >= 1".into());
+            }
+        }
+        StatuslineSubcommand::Render(args) => {
+            if args.force_passive && args.force_clickable {
+                return Err(
+                    "statusline render accepts only one of --force-passive or --force-clickable"
+                        .into(),
+                );
+            }
+        }
     }
-
-    let subcommand = positionals.first().map(String::as_str).unwrap_or("install");
-    match subcommand {
-        "install" => {
-            if force.is_some() {
-                Err("install does not accept render mode flags".into())
-            } else {
-                Ok(StatuslineCommand::Install { line })
-            }
-        }
-        "render" => {
-            if line.is_some() {
-                Err("render does not accept --line".into())
-            } else {
-                Ok(StatuslineCommand::Render { force })
-            }
-        }
-        "uninstall" => {
-            if force.is_some() {
-                Err("uninstall does not accept render mode flags".into())
-            } else {
-                Ok(StatuslineCommand::Uninstall { line })
-            }
-        }
-        other => Err(format!("unsupported statusline subcommand `{other}`").into()),
-    }
+    Ok(())
 }
 
-fn run_statusline_command(
+fn run_statusline_group(
     config: &ResolvedConfig,
-    command: StatuslineCommand,
+    command: StatuslineGroupCommand,
 ) -> Result<(), Box<dyn Error>> {
-    match command {
-        StatuslineCommand::Install { line } => install_statusline(config, line),
-        StatuslineCommand::Render { force } => render_statusline(config, force),
-        StatuslineCommand::Uninstall { line } => uninstall_statusline(config, line),
+    match command.command {
+        StatuslineSubcommand::Install(args) => install_statusline(config, args.line),
+        StatuslineSubcommand::Render(args) => {
+            let force = if args.force_passive {
+                Some(StatusRenderMode::Passive)
+            } else if args.force_clickable {
+                Some(StatusRenderMode::Clickable)
+            } else {
+                None
+            };
+            render_statusline(config, force)
+        }
+        StatuslineSubcommand::Uninstall(args) => uninstall_statusline(config, args.line),
     }
 }
 
@@ -1272,7 +1469,7 @@ fn update_branch_status(
 }
 
 fn branch_status_for_directory(path: &Path) -> Option<(GitBranchSync, bool)> {
-    let output = Command::new("git")
+    let output = ProcessCommand::new("git")
         .arg("-C")
         .arg(path)
         .args(["status", "--porcelain=2", "--branch"])
@@ -1395,14 +1592,15 @@ mod tests {
 
     use crate::{
         SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, STATUSLINE_REFRESH_COMMAND,
-        STATUSLINE_REFRESH_HOOKS, SidebarRuntime, StatuslineCommand, SurfaceKind,
-        activate_filter_selection, apply_session_sort, clear_sidebar_ui_state,
-        create_session_from_query, current_session_id, disable_sidebar_for_session, filter_items,
-        install_statusline_refresh_hooks, load_sidebar_ui_state, parse_statusline_command,
-        persist_sidebar_ui_state, picker_bindings, reconcile_sidebar_for_current_context,
-        selected_index_for_session, sidebar_requires_handoff, sidebar_state_path,
-        sidebar_surface_command, statusline_command_expression, statusline_mode,
-        uninstall_statusline_refresh_hooks,
+        STATUSLINE_REFRESH_HOOKS, SidebarRuntime, StatuslineGroupCommand, StatuslineRenderCommand,
+        StatuslineSubcommand, SurfaceKind, activate_filter_selection, apply_session_sort,
+        clear_sidebar_ui_state, create_session_from_query, current_session_id,
+        disable_sidebar_for_session, filter_items, install_statusline_refresh_hooks,
+        load_sidebar_ui_state, persist_sidebar_ui_state, picker_bindings,
+        reconcile_sidebar_for_current_context, selected_index_for_session,
+        sidebar_requires_handoff, sidebar_state_path, sidebar_surface_command,
+        statusline_command_expression, statusline_mode, uninstall_statusline_refresh_hooks,
+        validate_statusline_flags,
     };
 
     #[derive(Default)]
@@ -1836,26 +2034,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_statusline_subcommands_and_flags() {
-        assert_eq!(
-            parse_statusline_command(&[]).expect("default subcommand"),
-            StatuslineCommand::Install { line: None }
-        );
-        assert_eq!(
-            parse_statusline_command(&["render".to_string(), "--force-clickable".to_string()])
-                .expect("render flags"),
-            StatuslineCommand::Render {
-                force: Some(StatusRenderMode::Clickable),
-            }
-        );
-        assert_eq!(
-            parse_statusline_command(&[
-                "uninstall".to_string(),
-                "--line".to_string(),
-                "3".to_string()
-            ])
-            .expect("uninstall line"),
-            StatuslineCommand::Uninstall { line: Some(3) }
+    fn statusline_render_rejects_conflicting_force_flags() {
+        let command = StatuslineGroupCommand {
+            command: StatuslineSubcommand::Render(StatuslineRenderCommand {
+                force_passive: true,
+                force_clickable: true,
+            }),
+        };
+        let error =
+            validate_statusline_flags(&command).expect_err("conflicting flags should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("only one of --force-passive or --force-clickable")
         );
     }
 
