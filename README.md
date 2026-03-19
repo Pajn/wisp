@@ -6,6 +6,7 @@ Wisp is a native Rust tmux navigation tool inspired by `tmux-sessionx`. It share
 
 - tmux-aware session discovery, switching, and attachment
 - sidebar pane and sidebar popup surfaces in addition to the main picker
+- git worktree-aware picker: see only sessions for the current repo, or browse all worktrees
 - zoxide-backed directory discovery
 - fuzzy filtering and session previews
 - configurable behavior through TOML config plus environment overrides
@@ -49,11 +50,15 @@ Common commands after install:
 ```bash
 wisp doctor
 wisp popup
+wisp popup --worktree
 wisp fullscreen
+wisp fullscreen --worktree
 wisp sidebar-popup
 wisp sidebar-pane
 wisp statusline install
 ```
+
+Use `--worktree` (or `-w`) to start the picker in worktree mode, which shows only sessions belonging to worktrees of the current repo alongside worktrees that don't yet have sessions.
 
 Example tmux binding:
 

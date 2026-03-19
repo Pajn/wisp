@@ -7,7 +7,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
-use wisp_core::{GitBranchStatus, GitBranchSync, SessionListItem};
+use wisp_core::{GitBranchStatus, GitBranchSync, PickerMode, SessionListItem, SessionListItemKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceKind {
@@ -26,6 +26,7 @@ pub struct SurfaceModel {
     pub preview: Option<Vec<String>>,
     pub kind: SurfaceKind,
     pub bindings: KeyBindings,
+    pub mode: PickerMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub enum UiIntent {
     ToggleCompactSidebar,
     TogglePreview,
     ToggleDetails,
+    ToggleWorktreeMode,
     Close,
 }
 
@@ -62,6 +64,7 @@ pub struct KeyBindings {
     pub ctrl_m: UiIntent,
     pub esc: UiIntent,
     pub ctrl_c: UiIntent,
+    pub ctrl_w: UiIntent,
 }
 
 impl Default for KeyBindings {
@@ -82,6 +85,7 @@ impl Default for KeyBindings {
             ctrl_m: UiIntent::ToggleCompactSidebar,
             esc: UiIntent::Close,
             ctrl_c: UiIntent::Close,
+            ctrl_w: UiIntent::ToggleWorktreeMode,
         }
     }
 }
@@ -132,6 +136,9 @@ pub fn translate_key(key: KeyEvent, bindings: &KeyBindings) -> Option<UiIntent> 
         KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(bindings.ctrl_m.clone())
         }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(bindings.ctrl_w.clone())
+        }
         KeyCode::Backspace => Some(bindings.backspace.clone()),
         KeyCode::Char(character)
             if !key
@@ -159,6 +166,7 @@ fn render_picker(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
         buffer,
         model.title.as_str(),
         Text::from(model.query.as_str()),
+        false,
     );
 
     let body_chunks = if model.preview.is_some() {
@@ -181,6 +189,7 @@ fn render_picker(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
             buffer,
             "Preview",
             ansi_preview_text(preview),
+            true,
         );
     }
 
@@ -202,6 +211,7 @@ fn render_sidebar(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
         buffer,
         model.title.as_str(),
         Text::from(model.query.as_str()),
+        false,
     );
 
     render_list(
@@ -256,7 +266,9 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let marker = if item.is_current {
+            let marker = if matches!(item.kind, SessionListItemKind::Worktree) {
+                "W"
+            } else if item.is_current {
                 "•"
             } else if item.is_previous {
                 "‹›"
@@ -290,13 +302,12 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
                 let title_width = available_width
                     .saturating_sub(marker_width + session_width + gap_width + branch_space);
                 let session = pad_text(&truncate_text(&item.label, session_width), session_width);
-                let title = pad_text(
-                    &truncate_text(
-                        item.active_window_label.as_deref().unwrap_or_default(),
-                        title_width,
-                    ),
-                    title_width,
-                );
+                let title_source = item
+                    .active_window_label
+                    .as_deref()
+                    .or(item.path_hint.as_deref())
+                    .unwrap_or_default();
+                let title = pad_text(&truncate_text(title_source, title_width), title_width);
                 let prefix = if branch_width == 0 {
                     format!("{icon} {session}  {title}")
                 } else {
@@ -346,12 +357,47 @@ fn render_footer(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
     Paragraph::new(text).render(inner, buffer);
 }
 
-fn render_boxed_paragraph(area: Rect, buffer: &mut Buffer, title: &str, text: Text<'_>) {
+fn render_boxed_paragraph(
+    area: Rect,
+    buffer: &mut Buffer,
+    title: &str,
+    text: Text<'_>,
+    center_single_line: bool,
+) {
     let block = rounded_block(title);
     let inner = block.inner(area);
     block.render(area, buffer);
     Clear.render(inner, buffer);
-    Paragraph::new(text).render(inner, buffer);
+
+    // Center single-line content both vertically and horizontally.
+    let lines = text.lines.len();
+    if center_single_line && lines == 1 {
+        let line = &text.lines[0];
+        let line_width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        if line_width < usize::from(inner.width) {
+            let horizontal_pad = (usize::from(inner.width) - line_width) / 2;
+            let vertical_pad = if inner.height > 1 {
+                usize::from(inner.height) / 2
+            } else {
+                0
+            };
+
+            let mut centered_spans = vec![Span::raw(" ".repeat(horizontal_pad))];
+            centered_spans.extend(line.spans.iter().cloned());
+
+            let mut centered_text = Vec::with_capacity(vertical_pad + 1);
+            for _ in 0..vertical_pad {
+                centered_text.push(Line::from(""));
+            }
+            centered_text.push(Line::from(centered_spans));
+
+            Paragraph::new(Text::from(centered_text)).render(inner, buffer);
+        } else {
+            Paragraph::new(text).render(inner, buffer);
+        }
+    } else {
+        Paragraph::new(text).render(inner, buffer);
+    }
 }
 
 fn rounded_block(title: &str) -> Block<'_> {
@@ -363,7 +409,7 @@ fn rounded_block(title: &str) -> Block<'_> {
 
 fn bindings_help_text(bindings: &KeyBindings) -> String {
     format!(
-        "down {}  up {}  ^j {}  ^k {}  enter {}  S-enter {}  backspace {}  ^r {}  ^s {}  ^x {}  ^p {}  ^d {}  ^m {}  esc {}  ^c {}",
+        "down {}  up {}  ^j {}  ^k {}  enter {}  S-enter {}  backspace {}  ^r {}  ^s {}  ^x {}  ^p {}  ^d {}  ^m {}  ^w {}  esc {}  ^c {}",
         intent_label(&bindings.down),
         intent_label(&bindings.up),
         intent_label(&bindings.ctrl_j),
@@ -377,6 +423,7 @@ fn bindings_help_text(bindings: &KeyBindings) -> String {
         intent_label(&bindings.ctrl_p),
         intent_label(&bindings.ctrl_d),
         intent_label(&bindings.ctrl_m),
+        intent_label(&bindings.ctrl_w),
         intent_label(&bindings.esc),
         intent_label(&bindings.ctrl_c),
     )
@@ -405,6 +452,7 @@ fn intent_label(intent: &UiIntent) -> &'static str {
         UiIntent::SelectPrev => "move up",
         UiIntent::FilterChanged(_) => "filter",
         UiIntent::Backspace => "backspace",
+        UiIntent::ToggleWorktreeMode => "worktree",
     }
 }
 
@@ -656,8 +704,9 @@ fn ansi_named_color(code: u16) -> Color {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use ratatui::style::Color;
-    use wisp_core::{AttentionBadge, SessionListItem};
+    use wisp_core::{AttentionBadge, PickerMode, SessionListItem, SessionListItemKind};
 
     use crate::{
         KeyBindings, SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface,
@@ -668,6 +717,7 @@ mod tests {
         SessionListItem {
             session_id: label.to_string(),
             label: label.to_string(),
+            kind: SessionListItemKind::Session,
             is_current: false,
             is_previous: false,
             last_activity: None,
@@ -678,12 +728,14 @@ mod tests {
             path_hint: None,
             command_hint: None,
             git_branch: None,
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 
     #[test]
     fn renders_picker_with_preview() {
-        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 60, 12));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 12));
         let model = SurfaceModel {
             title: "Wisp Picker".to_string(),
             query: "alp".to_string(),
@@ -693,6 +745,7 @@ mod tests {
             preview: Some(vec!["preview line".to_string()]),
             kind: SurfaceKind::Picker,
             bindings: KeyBindings::default(),
+            mode: PickerMode::AllSessions,
         };
 
         render_surface(buffer.area, &mut buffer, &model);
@@ -725,7 +778,7 @@ mod tests {
 
     #[test]
     fn renders_compact_sidebar() {
-        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 30, 10));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 10));
         let mut current = item("alpha");
         current.is_current = true;
         current.attention = AttentionBadge::Bell;
@@ -738,6 +791,7 @@ mod tests {
             preview: None,
             kind: SurfaceKind::SidebarCompact,
             bindings: KeyBindings::default(),
+            mode: PickerMode::AllSessions,
         };
 
         render_surface(buffer.area, &mut buffer, &model);
@@ -749,6 +803,66 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Sidebar"));
         assert!(rendered.contains("•! alpha"));
+    }
+
+    #[test]
+    fn renders_worktree_rows_with_path_hint_in_sidebar() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 50, 10));
+        let model = SurfaceModel {
+            title: "Sidebar".to_string(),
+            query: String::new(),
+            items: vec![SessionListItem {
+                session_id: "worktree:/tmp/demo/app".to_string(),
+                label: "app".to_string(),
+                kind: SessionListItemKind::Worktree,
+                is_current: false,
+                is_previous: false,
+                last_activity: None,
+                attached: false,
+                attention: AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: Some("~/src/demo/app".to_string()),
+                command_hint: None,
+                git_branch: None,
+                worktree_path: Some(std::path::PathBuf::from("/tmp/demo/app")),
+                worktree_branch: Some("feature/demo".to_string()),
+            }],
+            selected: 0,
+            show_help: false,
+            preview: None,
+            kind: SurfaceKind::SidebarExpanded,
+            bindings: KeyBindings::default(),
+            mode: PickerMode::Worktree,
+        };
+
+        render_surface(buffer.area, &mut buffer, &model);
+
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("app"));
+        assert!(rendered.contains("~/src/demo/app"));
+    }
+
+    #[test]
+    fn centers_single_line_boxed_paragraph_horizontally_when_inner_height_is_one() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 12, 3));
+
+        super::render_boxed_paragraph(
+            buffer.area,
+            &mut buffer,
+            "",
+            ratatui::text::Text::from("hi"),
+            true,
+        );
+
+        let row = (0..usize::from(buffer.area.width))
+            .map(|x| buffer[(x as u16, 1)].symbol())
+            .collect::<String>();
+        assert!(row.contains("    hi"));
     }
 
     #[test]
@@ -815,6 +929,13 @@ mod tests {
                 &KeyBindings::default(),
             ),
             Some(UiIntent::TogglePreview)
+        );
+        assert_eq!(
+            translate_key(
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                &KeyBindings::default(),
+            ),
+            Some(UiIntent::ToggleWorktreeMode)
         );
         assert_eq!(
             translate_key(

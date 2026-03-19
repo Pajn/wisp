@@ -97,7 +97,7 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 
 | Key | Type | Default | Valid values | Notes |
 | --- | --- | --- | --- | --- |
-| `down` | string | `"move-down"` | `move-down`, `move-up`, `open`, `create-session-from-query`, `backspace`, `rename-session`, `close-session`, `toggle-preview`, `toggle-details`, `toggle-compact-sidebar`, `toggle-sort`, `close` | Action bound to Down Arrow. |
+| `down` | string | `"move-down"` | `move-down`, `move-up`, `open`, `create-session-from-query`, `backspace`, `rename-session`, `close-session`, `toggle-preview`, `toggle-details`, `toggle-compact-sidebar`, `toggle-sort`, `toggle-worktree-mode`, `close` | Action bound to Down Arrow. |
 | `up` | string | `"move-up"` | same as above | Action bound to Up Arrow. |
 | `ctrl_j` | string | `"move-down"` | same as above | Action bound to Ctrl-J. |
 | `ctrl_k` | string | `"move-up"` | same as above | Action bound to Ctrl-K. |
@@ -112,6 +112,7 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | `ctrl_s` | string | `"toggle-sort"` | same as above | Action bound to Ctrl-S. |
 | `esc` | string | `"close"` | same as above | Action bound to Escape. |
 | `ctrl_c` | string | `"close"` | same as above | Action bound to Ctrl-C. |
+| `ctrl_w` | string | `"toggle-worktree-mode"` | same as above | Action bound to Ctrl-W. |
 
 These bindings control every special picker shortcut Wisp shows in its inline help footer. Plain character input still appends to the filter query, but navigation, backspace, creation, preview toggles, sort toggles, and close keys are all config-backed. The default `Ctrl-S` binding toggles between the recent picker order and stable alphabetical order without losing the current selection.
 When rename mode is active, the input box edits the selected session name, `Enter` commits, and `Esc` or `Ctrl-C` cancels.

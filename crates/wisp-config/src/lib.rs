@@ -78,6 +78,7 @@ impl Default for ResolvedConfig {
                 ctrl_p: KeyAction::TogglePreview,
                 ctrl_d: KeyAction::ToggleDetails,
                 ctrl_m: KeyAction::ToggleCompactSidebar,
+                ctrl_w: KeyAction::ToggleWorktreeMode,
                 esc: KeyAction::Close,
                 ctrl_c: KeyAction::Close,
             },
@@ -159,6 +160,7 @@ pub struct ActionsConfig {
     pub ctrl_p: KeyAction,
     pub ctrl_d: KeyAction,
     pub ctrl_m: KeyAction,
+    pub ctrl_w: KeyAction,
     pub esc: KeyAction,
     pub ctrl_c: KeyAction,
 }
@@ -271,6 +273,7 @@ pub enum KeyAction {
     TogglePreview,
     ToggleDetails,
     ToggleCompactSidebar,
+    ToggleWorktreeMode,
     Close,
 }
 
@@ -749,6 +752,9 @@ impl PartialConfig {
         if let Some(ctrl_m) = self.actions.ctrl_m {
             config.actions.ctrl_m = ctrl_m;
         }
+        if let Some(ctrl_w) = self.actions.ctrl_w {
+            config.actions.ctrl_w = ctrl_w;
+        }
         if let Some(esc) = self.actions.esc {
             config.actions.esc = esc;
         }
@@ -912,6 +918,7 @@ struct PartialActionsConfig {
     ctrl_p: Option<KeyAction>,
     ctrl_d: Option<KeyAction>,
     ctrl_m: Option<KeyAction>,
+    ctrl_w: Option<KeyAction>,
     esc: Option<KeyAction>,
     ctrl_c: Option<KeyAction>,
 }
@@ -931,6 +938,7 @@ impl PartialActionsConfig {
         merge_option(&mut self.ctrl_p, other.ctrl_p);
         merge_option(&mut self.ctrl_d, other.ctrl_d);
         merge_option(&mut self.ctrl_m, other.ctrl_m);
+        merge_option(&mut self.ctrl_w, other.ctrl_w);
         merge_option(&mut self.esc, other.esc);
         merge_option(&mut self.ctrl_c, other.ctrl_c);
     }
@@ -1049,6 +1057,7 @@ mod tests {
         );
         assert_eq!(config.actions.backspace, KeyAction::Backspace);
         assert_eq!(config.actions.ctrl_s, KeyAction::ToggleSort);
+        assert_eq!(config.actions.ctrl_w, KeyAction::ToggleWorktreeMode);
     }
 
     #[test]

@@ -135,5 +135,38 @@ pub fn preview_request_for_candidate(candidate: &Candidate) -> PreviewRequest {
             key: candidate.preview_key.clone(),
             path: metadata.root.clone(),
         },
+        CandidateMetadata::Worktree(metadata) => PreviewRequest::Directory {
+            key: candidate.preview_key.clone(),
+            path: metadata.full_path.clone(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::{
+        Candidate, PreviewKey, PreviewRequest, WorktreeMetadata, preview_request_for_candidate,
+    };
+
+    #[test]
+    fn maps_worktree_candidates_to_directory_previews_using_full_path() {
+        let full_path = PathBuf::from("/tmp/demo-worktree");
+        let candidate = Candidate::worktree(WorktreeMetadata {
+            full_path: full_path.clone(),
+            display_path: "~/demo-worktree".to_string(),
+            branch: Some("feature/demo".to_string()),
+        });
+
+        let request = preview_request_for_candidate(&candidate);
+
+        assert_eq!(
+            request,
+            PreviewRequest::Directory {
+                key: PreviewKey::Directory(full_path.clone()),
+                path: full_path,
+            }
+        );
     }
 }

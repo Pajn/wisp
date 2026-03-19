@@ -109,6 +109,7 @@ truncate_long_lines = true
 # "toggle-details"
 # "toggle-compact-sidebar"
 # "toggle-sort"
+# "toggle-worktree-mode"
 # "close"
 # Defaults for the supported special keys:
 down = "move-down"
@@ -126,6 +127,7 @@ ctrl_m = "toggle-compact-sidebar"
 ctrl_s = "toggle-sort"
 esc = "close"
 ctrl_c = "close"
+ctrl_w = "toggle-worktree-mode"
 
 [logging]
 # Log verbosity: "error", "warn", "info", "debug", or "trace".

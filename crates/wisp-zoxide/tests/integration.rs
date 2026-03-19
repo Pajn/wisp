@@ -1,7 +1,7 @@
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,6 +15,18 @@ fn unique_root() -> PathBuf {
     std::env::temp_dir().join(format!("wisp-zoxide-test-{nonce}"))
 }
 
+fn write_fake_zoxide_script(script: &Path, contents: String) {
+    let staging = script.with_extension("tmp");
+    fs::write(&staging, contents).expect("fake zoxide script");
+
+    let mut permissions = fs::metadata(&staging)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&staging, permissions).expect("executable fake zoxide");
+    fs::rename(&staging, script).expect("publish fake zoxide");
+}
+
 #[test]
 fn loads_entries_from_a_fake_zoxide_binary() {
     let root = unique_root();
@@ -24,20 +36,14 @@ fn loads_entries_from_a_fake_zoxide_binary() {
     fs::create_dir_all(&workspace).expect("workspace directory");
 
     let script = bin_dir.join("zoxide");
-    fs::write(
+    write_fake_zoxide_script(
         &script,
         format!(
             "#!/bin/sh\nprintf '12.5 {workspace}\\n4.0 {workspace}/../workspace\\n99.0 {root}/missing\\n'\n",
             workspace = workspace.display(),
             root = root.display(),
         ),
-    )
-    .expect("fake zoxide script");
-    let mut permissions = fs::metadata(&script)
-        .expect("script metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).expect("executable fake zoxide");
+    );
 
     let entries = CommandZoxideProvider::new()
         .with_binary(&script)
@@ -61,20 +67,14 @@ fn queries_the_best_matching_directory() {
     fs::create_dir_all(&nested).expect("nested workspace directory");
 
     let script = bin_dir.join("zoxide");
-    fs::write(
+    write_fake_zoxide_script(
         &script,
         format!(
             "#!/bin/sh\nif [ \"$1\" = \"query\" ] && [ \"$4\" = \"dev\" ] && [ \"$5\" = \"shell\" ]; then\n  printf '90.0 {nested}\\n12.0 {workspace}\\n'\nelse\n  exit 1\nfi\n",
             nested = nested.display(),
             workspace = workspace.display(),
         ),
-    )
-    .expect("fake zoxide script");
-    let mut permissions = fs::metadata(&script)
-        .expect("script metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).expect("executable fake zoxide");
+    );
 
     let entry = CommandZoxideProvider::new()
         .with_binary(&script)
