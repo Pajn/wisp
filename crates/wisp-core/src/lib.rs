@@ -8,8 +8,8 @@ mod view;
 pub use action::{Action, CandidateAction, ResolvedAction, resolve_action, sanitize_session_name};
 pub use candidate::{
     Candidate, CandidateId, CandidateKind, CandidateMetadata, DirectoryMetadata, ScoreHints,
-    SessionMetadata, WindowMetadata, deduplicate_candidates, normalize_display_path,
-    sort_candidates,
+    SessionMetadata, WindowMetadata, WorktreeMetadata, deduplicate_candidates,
+    normalize_display_path, sort_candidates,
 };
 pub use domain::{
     AlertAggregate, AlertState, AttentionBadge, ClientFocus, ClientId, DirectoryRecord,
@@ -21,17 +21,19 @@ pub use preview::{
 };
 pub use reduce::{DomainEvent, reduce_domain_event};
 pub use view::{
-    GitBranchStatus, GitBranchSync, SessionListItem, SessionListSortMode, StatusSessionItem,
-    derive_candidates, derive_session_list, derive_status_items, sort_session_list_items,
+    GitBranchStatus, GitBranchSync, PickerMode, SessionListItem, SessionListItemKind,
+    SessionListSortMode, StatusSessionItem, WorktreeInfo, derive_candidates, derive_session_list,
+    derive_session_list_with_worktrees, derive_status_items, sort_session_list_items,
 };
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use crate::candidate::WorktreeMetadata;
     use crate::{
-        Candidate, CandidateAction, CandidateMetadata, DirectoryMetadata, PreviewKey, PreviewKind,
-        ResolvedAction, ScoreHints, SessionMetadata, deduplicate_candidates,
+        Candidate, CandidateAction, CandidateId, CandidateMetadata, DirectoryMetadata, PreviewKey,
+        PreviewKind, ResolvedAction, ScoreHints, SessionMetadata, deduplicate_candidates,
         normalize_display_path, preview_request_for_candidate, resolve_action, sort_candidates,
     };
 
@@ -66,6 +68,34 @@ mod tests {
 
         assert_eq!(deduplicated.len(), 1);
         assert_eq!(deduplicated[0].score_hints.source_score, Some(9));
+    }
+
+    #[test]
+    fn keeps_worktrees_distinct_from_directories_when_deduplicating() {
+        let directory = Candidate::directory(DirectoryMetadata {
+            full_path: PathBuf::from("/tmp/wisp"),
+            display_path: "/tmp/wisp".to_string(),
+            zoxide_score: Some(5.0),
+            git_root_hint: None,
+            exists: true,
+        });
+        let worktree = Candidate::worktree(WorktreeMetadata {
+            full_path: PathBuf::from("/tmp/wisp"),
+            display_path: "/tmp/wisp".to_string(),
+            branch: Some("feature/demo".to_string()),
+        });
+
+        let deduplicated = deduplicate_candidates([directory, worktree]);
+
+        assert_eq!(deduplicated.len(), 2);
+        assert!(deduplicated.iter().any(|candidate| matches!(
+            candidate.id,
+            CandidateId::Directory(ref path) if path == &PathBuf::from("/tmp/wisp")
+        )));
+        assert!(deduplicated.iter().any(|candidate| matches!(
+            candidate.id,
+            CandidateId::Worktree(ref path) if path == &PathBuf::from("/tmp/wisp")
+        )));
     }
 
     #[test]

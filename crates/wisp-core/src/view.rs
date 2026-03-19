@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{
     AttentionBadge, Candidate, DirectoryMetadata, DirectoryRecord, DomainState, SessionMetadata,
@@ -9,6 +9,7 @@ use crate::{
 pub struct SessionListItem {
     pub session_id: String,
     pub label: String,
+    pub kind: SessionListItemKind,
     pub is_current: bool,
     pub is_previous: bool,
     pub last_activity: Option<u64>,
@@ -19,6 +20,8 @@ pub struct SessionListItem {
     pub path_hint: Option<String>,
     pub command_hint: Option<String>,
     pub git_branch: Option<GitBranchStatus>,
+    pub worktree_path: Option<PathBuf>,
+    pub worktree_branch: Option<String>,
 }
 
 impl SessionListItem {
@@ -27,8 +30,10 @@ impl SessionListItem {
         [
             Some(self.label.as_str()),
             self.active_window_label.as_deref(),
+            self.path_hint.as_deref(),
             self.command_hint.as_deref(),
             self.git_branch.as_ref().map(|branch| branch.name.as_str()),
+            self.worktree_branch.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -45,11 +50,37 @@ pub struct GitBranchStatus {
     pub dirty: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub is_locked: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PickerMode {
+    #[default]
+    AllSessions,
+    Worktree,
+}
+
+/// Synchronization state for a git branch in the UI.
+///
+/// The current status pipeline only distinguishes whether the branch still needs to be pushed.
+/// Branches that are only behind their upstream remain [`GitBranchSync::Pushed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitBranchSync {
     Unknown,
     Pushed,
     NotPushed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionListItemKind {
+    Info,            // informational row, not an actionable session
+    Session,         // regular tmux session (not in a worktree)
+    WorktreeSession, // session running in a worktree
+    Worktree,        // worktree with no session
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +149,7 @@ pub fn derive_session_list(state: &DomainState, client_id: Option<&str>) -> Vec<
             SessionListItem {
                 session_id: session_id.clone(),
                 label: session.name.clone(),
+                kind: SessionListItemKind::Session,
                 is_current: current == Some(session_id),
                 is_previous: previous == Some(session_id),
                 last_activity: session.sort_key.last_activity,
@@ -133,9 +165,143 @@ pub fn derive_session_list(state: &DomainState, client_id: Option<&str>) -> Vec<
                 }),
                 command_hint: active_window.and_then(|window| window.active_command.clone()),
                 git_branch: None,
+                worktree_path: None,
+                worktree_branch: None,
             }
         })
         .collect::<Vec<_>>();
+
+    sort_session_list_items(&mut items, SessionListSortMode::Recent);
+    items
+}
+
+/// Derives a session list that shows only worktree-related items.
+/// - Sessions in worktrees are shown as WorktreeSession
+/// - Worktrees without sessions are shown as Worktree
+/// - Regular sessions (not in any worktree) are excluded
+pub fn derive_session_list_with_worktrees(
+    state: &DomainState,
+    client_id: Option<&str>,
+    worktrees: &[WorktreeInfo],
+) -> Vec<SessionListItem> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let current = state.current_session_id(client_id);
+    let previous = state.previous_session_id(client_id);
+
+    // Build a map of worktree path -> worktree info for matching
+    let worktree_map: BTreeMap<&Path, &WorktreeInfo> =
+        worktrees.iter().map(|w| (w.path.as_path(), w)).collect();
+
+    // Find which worktree a path belongs to (if any)
+    fn find_worktree_for_path<'a>(
+        path: &Path,
+        worktree_map: &'a BTreeMap<&Path, &WorktreeInfo>,
+    ) -> Option<&'a WorktreeInfo> {
+        worktree_map
+            .iter()
+            .filter(|(wt_path, _)| path == **wt_path || path.starts_with(*wt_path))
+            .max_by_key(|(wt_path, _)| wt_path.as_os_str().len())
+            .map(|(_, wt)| *wt)
+    }
+
+    // Process sessions: only include if they match a worktree
+    let mut items: Vec<SessionListItem> = state
+        .sessions
+        .iter()
+        .filter_map(|(session_id, session)| {
+            let active_window = session
+                .windows
+                .values()
+                .find(|window| window.active)
+                .or_else(|| session.windows.values().next());
+
+            let current_path = active_window.and_then(|w| w.current_path.as_deref());
+
+            let worktree = current_path.and_then(|p| find_worktree_for_path(p, &worktree_map))?;
+
+            Some(SessionListItem {
+                session_id: session_id.clone(),
+                label: session.name.clone(),
+                kind: SessionListItemKind::WorktreeSession,
+                is_current: current == Some(session_id),
+                is_previous: previous == Some(session_id),
+                last_activity: session.sort_key.last_activity,
+                attached: session.attached,
+                attention: session.aggregate_alerts.highest_priority,
+                attention_count: session.aggregate_alerts.attention_count,
+                active_window_label: active_window.map(|window| window.name.clone()),
+                path_hint: active_window.and_then(|window| {
+                    window
+                        .current_path
+                        .as_deref()
+                        .map(|path| normalize_display_path(path, None))
+                }),
+                command_hint: active_window.and_then(|window| window.active_command.clone()),
+                git_branch: Some(GitBranchStatus {
+                    name: worktree
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| "(detached)".to_string()),
+                    sync: GitBranchSync::Unknown,
+                    dirty: false,
+                }),
+                worktree_path: Some(worktree.path.clone()),
+                worktree_branch: worktree.branch.clone(),
+            })
+        })
+        .collect();
+
+    // Add worktrees that don't have matching sessions
+    let session_paths: BTreeSet<&Path> = state
+        .sessions
+        .iter()
+        .filter_map(|(_, session)| {
+            session
+                .windows
+                .values()
+                .find(|window| window.active)
+                .or_else(|| session.windows.values().next())
+                .and_then(|w| w.current_path.as_deref())
+        })
+        .collect();
+
+    for worktree in worktrees {
+        let matched_session = session_paths.iter().any(|path| {
+            *path == worktree.path.as_path() || path.starts_with(worktree.path.as_path())
+        });
+
+        if !matched_session {
+            let basename = worktree
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            items.push(SessionListItem {
+                session_id: format!("worktree:{}", worktree.path.display()),
+                label: basename,
+                kind: SessionListItemKind::Worktree,
+                is_current: false,
+                is_previous: false,
+                last_activity: None,
+                attached: false,
+                attention: AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: Some(normalize_display_path(&worktree.path, None)),
+                command_hint: None,
+                git_branch: Some(GitBranchStatus {
+                    name: worktree.branch.clone().unwrap_or_default(),
+                    sync: GitBranchSync::Unknown,
+                    dirty: false,
+                }),
+                worktree_path: Some(worktree.path.clone()),
+                worktree_branch: worktree.branch.clone(),
+            });
+        }
+    }
 
     sort_session_list_items(&mut items, SessionListSortMode::Recent);
     items
@@ -200,9 +366,9 @@ mod tests {
 
     use crate::{
         AlertAggregate, AttentionBadge, ClientFocus, DirectoryRecord, DomainState, GitBranchStatus,
-        GitBranchSync, SessionListItem, SessionListSortMode, SessionRecord, SessionSortKey,
-        WindowRecord, derive_candidates, derive_session_list, derive_status_items,
-        sort_session_list_items,
+        GitBranchSync, SessionListItem, SessionListItemKind, SessionListSortMode, SessionRecord,
+        SessionSortKey, WindowRecord, WorktreeInfo, derive_candidates, derive_session_list,
+        derive_session_list_with_worktrees, derive_status_items, sort_session_list_items,
     };
 
     fn seeded_state() -> DomainState {
@@ -343,6 +509,7 @@ mod tests {
             SessionListItem {
                 session_id: "beta".to_string(),
                 label: "beta".to_string(),
+                kind: SessionListItemKind::Session,
                 is_current: false,
                 is_previous: true,
                 last_activity: Some(2),
@@ -353,10 +520,13 @@ mod tests {
                 path_hint: None,
                 command_hint: None,
                 git_branch: None,
+                worktree_path: None,
+                worktree_branch: None,
             },
             SessionListItem {
                 session_id: "alpha".to_string(),
                 label: "alpha".to_string(),
+                kind: SessionListItemKind::Session,
                 is_current: true,
                 is_previous: false,
                 last_activity: Some(3),
@@ -367,10 +537,13 @@ mod tests {
                 path_hint: None,
                 command_hint: None,
                 git_branch: None,
+                worktree_path: None,
+                worktree_branch: None,
             },
             SessionListItem {
                 session_id: "aardvark".to_string(),
                 label: "aardvark".to_string(),
+                kind: SessionListItemKind::Session,
                 is_current: false,
                 is_previous: false,
                 last_activity: Some(1),
@@ -381,6 +554,8 @@ mod tests {
                 path_hint: None,
                 command_hint: None,
                 git_branch: None,
+                worktree_path: None,
+                worktree_branch: None,
             },
         ];
 
@@ -408,6 +583,7 @@ mod tests {
         let item = SessionListItem {
             session_id: "alpha".to_string(),
             label: "alpha".to_string(),
+            kind: SessionListItemKind::Session,
             is_current: false,
             is_previous: false,
             last_activity: None,
@@ -422,11 +598,134 @@ mod tests {
                 sync: GitBranchSync::Unknown,
                 dirty: false,
             }),
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         assert_eq!(
             item.picker_search_text(),
             "alpha editor nvim feature/picker-branches"
+        );
+    }
+
+    #[test]
+    fn picker_search_text_includes_path_hint() {
+        let item = SessionListItem {
+            session_id: "worktree:/tmp/demo/app".to_string(),
+            label: "app".to_string(),
+            kind: SessionListItemKind::Worktree,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: Some("~/src/demo/app".to_string()),
+            command_hint: None,
+            git_branch: None,
+            worktree_path: Some(PathBuf::from("/tmp/demo/app")),
+            worktree_branch: Some("feature/demo".to_string()),
+        };
+
+        assert_eq!(item.picker_search_text(), "app ~/src/demo/app feature/demo");
+    }
+
+    #[test]
+    fn omits_worktree_rows_when_a_session_path_is_nested_inside_the_worktree() {
+        let state = seeded_state();
+        let worktrees = vec![WorktreeInfo {
+            path: PathBuf::from("/tmp"),
+            branch: Some("main".to_string()),
+            is_locked: false,
+        }];
+
+        let items = derive_session_list_with_worktrees(&state, Some("client-1"), &worktrees);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, SessionListItemKind::WorktreeSession);
+        assert_eq!(
+            items[0].worktree_path.as_deref(),
+            Some(std::path::Path::new("/tmp"))
+        );
+    }
+
+    #[test]
+    fn picks_the_deepest_matching_worktree_for_nested_paths() {
+        let state = seeded_state();
+        let worktrees = vec![
+            WorktreeInfo {
+                path: PathBuf::from("/tmp"),
+                branch: Some("root".to_string()),
+                is_locked: false,
+            },
+            WorktreeInfo {
+                path: PathBuf::from("/tmp/alpha"),
+                branch: Some("nested".to_string()),
+                is_locked: false,
+            },
+        ];
+
+        let items = derive_session_list_with_worktrees(&state, Some("client-1"), &worktrees);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, SessionListItemKind::WorktreeSession);
+        assert_eq!(
+            items[0].worktree_path.as_deref(),
+            Some(std::path::Path::new("/tmp/alpha"))
+        );
+        assert_eq!(items[0].worktree_branch.as_deref(), Some("nested"));
+    }
+
+    #[test]
+    fn detached_worktrees_still_get_git_branch_status_placeholders() {
+        let state = seeded_state();
+        let worktrees = vec![WorktreeInfo {
+            path: PathBuf::from("/tmp/detached"),
+            branch: None,
+            is_locked: false,
+        }];
+
+        let items = derive_session_list_with_worktrees(&state, Some("client-1"), &worktrees);
+        let detached = items
+            .into_iter()
+            .find(|item| item.kind == SessionListItemKind::Worktree)
+            .expect("detached worktree row");
+
+        assert_eq!(
+            detached.git_branch,
+            Some(GitBranchStatus {
+                name: String::new(),
+                sync: GitBranchSync::Unknown,
+                dirty: false,
+            })
+        );
+    }
+
+    #[test]
+    fn sorts_worktree_projection_with_recent_ordering() {
+        let state = DomainState::default();
+        let worktrees = vec![
+            WorktreeInfo {
+                path: PathBuf::from("/tmp/zeta"),
+                branch: Some("zeta".to_string()),
+                is_locked: false,
+            },
+            WorktreeInfo {
+                path: PathBuf::from("/tmp/alpha"),
+                branch: Some("alpha".to_string()),
+                is_locked: false,
+            },
+        ];
+
+        let items = derive_session_list_with_worktrees(&state, None, &worktrees);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
         );
     }
 }

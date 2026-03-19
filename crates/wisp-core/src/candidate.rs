@@ -12,6 +12,7 @@ pub enum CandidateKind {
     TmuxWindow,
     Directory,
     Project,
+    Worktree,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -19,6 +20,7 @@ pub enum CandidateId {
     Session(String),
     Window { session: String, index: u32 },
     Directory(PathBuf),
+    Worktree(PathBuf),
     Project(String),
 }
 
@@ -83,6 +85,30 @@ impl Candidate {
     }
 
     #[must_use]
+    pub fn worktree(metadata: WorktreeMetadata) -> Self {
+        let primary_text = metadata.display_path.clone();
+        let mut search_terms = vec![
+            metadata.display_path.clone(),
+            metadata.full_path.display().to_string(),
+        ];
+        if let Some(branch) = &metadata.branch {
+            search_terms.push(branch.clone());
+        }
+
+        Self {
+            id: CandidateId::Worktree(metadata.full_path.clone()),
+            kind: CandidateKind::Worktree,
+            search_terms,
+            preview_key: PreviewKey::Directory(metadata.full_path.clone()),
+            score_hints: ScoreHints::default(),
+            action: CandidateAction::CreateOrSwitchSession,
+            metadata: CandidateMetadata::Worktree(metadata),
+            primary_text,
+            secondary_text: Some("worktree".to_string()),
+        }
+    }
+
+    #[must_use]
     pub fn searchable_text(&self) -> String {
         self.search_terms.join(" ")
     }
@@ -107,6 +133,7 @@ pub enum CandidateMetadata {
     Window(WindowMetadata),
     Directory(DirectoryMetadata),
     Project(ProjectMetadata),
+    Worktree(WorktreeMetadata),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +166,13 @@ pub struct DirectoryMetadata {
 pub struct ProjectMetadata {
     pub name: String,
     pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeMetadata {
+    pub full_path: PathBuf,
+    pub display_path: String,
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

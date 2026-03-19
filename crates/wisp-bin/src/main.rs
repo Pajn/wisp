@@ -6,7 +6,6 @@ use std::{
     fs,
     io::stdout,
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
     process::ExitCode,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -26,8 +25,9 @@ use wisp_config::{
     CliOverrides, KeyAction, LoadOptions, ResolvedConfig, SessionSortMode, load_config,
 };
 use wisp_core::{
-    DomainState, GitBranchStatus, GitBranchSync, PreviewKey, PreviewRequest, SessionListItem,
-    SessionListSortMode, derive_session_list, derive_status_items, sort_session_list_items,
+    DomainState, GitBranchStatus, GitBranchSync, PickerMode, PreviewKey, PreviewRequest,
+    SessionListItem, SessionListSortMode, derive_session_list, derive_session_list_with_worktrees,
+    derive_status_items, sanitize_session_name, sort_session_list_items,
 };
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
 use wisp_preview::{ActivePanePreviewProvider, PreviewProvider, SessionDetailsPreviewProvider};
@@ -39,7 +39,10 @@ use wisp_tmux::{
 use wisp_ui::{KeyBindings, SurfaceKind, SurfaceModel, UiIntent, render_surface, translate_key};
 use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
 
+mod git;
+
 const PREVIEW_REFRESH_DEBOUNCE: Duration = Duration::from_millis(400);
+const DEFAULT_CLIENT_ID: &str = "default";
 const SIDEBAR_PANE_TITLE: &str = "Wisp Sidebar";
 const SIDEBAR_PANE_WIDTH: u16 = 36;
 const STATUSLINE_REFRESH_HOOKS: &[&str] = &[
@@ -85,12 +88,20 @@ struct PrintConfigCommand {}
 #[derive(Debug, FromArgs, PartialEq)]
 #[argh(subcommand, name = "fullscreen")]
 /// Open the main picker fullscreen in tmux.
-struct FullscreenCommand {}
+pub struct FullscreenCommand {
+    #[argh(switch, short = 'w', long = "worktree")]
+    /// start in worktree mode, showing only worktrees from the current repo
+    pub worktree: bool,
+}
 
 #[derive(Debug, FromArgs, PartialEq)]
 #[argh(subcommand, name = "popup")]
 /// Open the main picker in a tmux popup.
-struct PopupCommandCli {}
+pub struct PopupCommandCli {
+    #[argh(switch, short = 'w', long = "worktree")]
+    /// start in worktree mode, showing only worktrees from the current repo
+    pub worktree: bool,
+}
 
 #[derive(Debug, FromArgs, PartialEq)]
 #[argh(subcommand, name = "sidebar-popup")]
@@ -151,7 +162,7 @@ struct StatuslineUninstallCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiMode {
-    Picker,
+    Picker(PickerMode),
     SidebarCompact,
     SidebarExpanded,
 }
@@ -159,11 +170,12 @@ enum UiMode {
 impl FromArgValue for UiMode {
     fn from_arg_value(value: &str) -> Result<Self, String> {
         match value {
-            "picker" => Ok(Self::Picker),
+            "picker" => Ok(Self::Picker(PickerMode::AllSessions)),
+            "picker-worktree" => Ok(Self::Picker(PickerMode::Worktree)),
             "sidebar-compact" => Ok(Self::SidebarCompact),
             "sidebar-expanded" => Ok(Self::SidebarExpanded),
             other => Err(format!(
-                "expected one of \"picker\", \"sidebar-compact\", or \"sidebar-expanded\", got `{other}`"
+                "expected one of \"picker\", \"picker-worktree\", \"sidebar-compact\", or \"sidebar-expanded\", got `{other}`"
             )),
         }
     }
@@ -172,9 +184,16 @@ impl FromArgValue for UiMode {
 impl UiMode {
     fn surface_kind(self) -> SurfaceKind {
         match self {
-            Self::Picker => SurfaceKind::Picker,
+            Self::Picker(_) => SurfaceKind::Picker,
             Self::SidebarCompact => SurfaceKind::SidebarCompact,
             Self::SidebarExpanded => SurfaceKind::SidebarExpanded,
+        }
+    }
+
+    fn picker_mode(self) -> PickerMode {
+        match self {
+            Self::Picker(mode) => mode,
+            Self::SidebarCompact | Self::SidebarExpanded => PickerMode::AllSessions,
         }
     }
 }
@@ -254,7 +273,7 @@ enum ParsedCli {
 fn ui_help_early_exit(command_name: &str) -> argh::EarlyExit {
     argh::EarlyExit {
         output: format!(
-            "Usage: {command_name} ui <mode>\n\n    Internal helper for launching a specific surface.\n\n    Modes:\n      picker             Open the picker surface.\n      sidebar-compact    Open the compact sidebar surface.\n      sidebar-expanded   Open the expanded sidebar surface.\n"
+            "Usage: {command_name} ui <mode>\n\n    Internal helper for launching a specific surface.\n\n    Modes:\n      picker             Open the picker surface.\n      picker-worktree    Open the picker surface in worktree mode.\n      sidebar-compact    Open the compact sidebar surface.\n      sidebar-expanded   Open the expanded sidebar surface.\n"
         ),
         status: Ok(()),
     }
@@ -273,7 +292,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedCli, argh::EarlyExit> {
             Some(mode) => {
                 if cli_args.len() > 2 {
                     return Err(ui_parse_error(
-                        "ui accepts exactly one surface mode: picker, sidebar-compact, or sidebar-expanded",
+                        "ui accepts exactly one surface mode: picker, picker-worktree, sidebar-compact, or sidebar-expanded",
                     ));
                 }
 
@@ -322,7 +341,7 @@ fn execute_cli(cli: ParsedCli) -> Result<(), Box<dyn Error>> {
     match cli {
         ParsedCli::Ui(mode) => {
             let config = load_runtime_config()?;
-            run_surface(mode.surface_kind(), &config)
+            run_surface(mode.surface_kind(), &config, mode.picker_mode())
         }
         ParsedCli::Public(cli) => match cli.command {
             Command::Doctor(_) => {
@@ -334,13 +353,23 @@ fn execute_cli(cli: ParsedCli) -> Result<(), Box<dyn Error>> {
                 println!("{config:#?}");
                 Ok(())
             }
-            Command::Fullscreen(_) => {
+            Command::Fullscreen(fullscreen_cmd) => {
                 let config = load_runtime_config()?;
-                run_surface(SurfaceKind::Picker, &config)
+                let mode = if fullscreen_cmd.worktree {
+                    PickerMode::Worktree
+                } else {
+                    PickerMode::AllSessions
+                };
+                run_surface(SurfaceKind::Picker, &config, mode)
             }
-            Command::Popup(_) => {
+            Command::Popup(popup_cmd) => {
                 let config = load_runtime_config()?;
-                open_popup_or_run_inline(SurfaceKind::Picker, &config)
+                let mode = if popup_cmd.worktree {
+                    PickerMode::Worktree
+                } else {
+                    PickerMode::AllSessions
+                };
+                open_popup_or_run_inline(SurfaceKind::Picker, &config, mode)
             }
             Command::SidebarPopup(_) => {
                 let config = load_runtime_config()?;
@@ -582,6 +611,67 @@ fn create_session_from_query(
     Ok(true)
 }
 
+fn create_session_from_worktree_path(
+    tmux: &impl TmuxClient,
+    worktree_path: &Path,
+) -> Result<bool, Box<dyn Error>> {
+    let normalized_path = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
+    let session_name = format!(
+        "{}-{:08x}",
+        sanitize_session_name(&normalized_path),
+        stable_path_hash(&normalized_path) as u32
+    );
+    tmux.create_or_switch_session(&session_name, worktree_path)?;
+    Ok(true)
+}
+
+fn session_items_for_picker_mode(
+    state: &DomainState,
+    client_id: Option<&str>,
+    picker_mode: PickerMode,
+) -> Vec<SessionListItem> {
+    if picker_mode == PickerMode::Worktree {
+        if let Some(repo_root) = git::worktree_repo_root(state, client_id) {
+            let worktrees = git::git_worktree_list(&repo_root);
+            derive_session_list_with_worktrees(state, client_id, &worktrees)
+        } else {
+            vec![picker_info_item("not in a git repository")]
+        }
+    } else {
+        derive_session_list(state, client_id)
+    }
+}
+
+fn rebuild_session_items_for_picker_mode(
+    state: &DomainState,
+    client_id: Option<&str>,
+    picker_mode: PickerMode,
+    session_sort: SessionSortMode,
+) -> (
+    Vec<SessionListItem>,
+    VecDeque<GitWorkItem>,
+    mpsc::Receiver<GitStatusUpdate>,
+) {
+    let mut session_items = session_items_for_picker_mode(state, client_id, picker_mode);
+    let pending_branch_names = if picker_mode == PickerMode::Worktree {
+        VecDeque::new()
+    } else {
+        git_work_items(state)
+    };
+    let status_work_items = if picker_mode == PickerMode::Worktree {
+        git_work_items_for_worktree_items(&session_items)
+            .into_iter()
+            .collect()
+    } else {
+        pending_branch_names.iter().cloned().collect()
+    };
+    apply_session_sort(&mut session_items, session_sort);
+    let branch_status_updates = spawn_git_status_workers(status_work_items);
+    (session_items, pending_branch_names, branch_status_updates)
+}
+
 fn activate_filter_selection(
     tmux: &impl TmuxClient,
     zoxide: &impl ZoxideProvider,
@@ -596,6 +686,17 @@ fn activate_filter_selection(
     }
 
     if let Some(item) = filtered.get(selected) {
+        match item.kind {
+            wisp_core::SessionListItemKind::Info => return Ok(false),
+            wisp_core::SessionListItemKind::Worktree => {
+                if let Some(worktree_path) = &item.worktree_path {
+                    return create_session_from_worktree_path(tmux, worktree_path);
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+
         tmux.switch_or_attach_session(&item.session_id)?;
         return Ok(true);
     }
@@ -606,11 +707,18 @@ fn activate_filter_selection(
 fn open_popup_or_run_inline(
     kind: SurfaceKind,
     config: &ResolvedConfig,
+    mode: PickerMode,
 ) -> Result<(), Box<dyn Error>> {
     let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
     let command = PopupCommand {
         program: env::current_exe()?,
-        args: vec!["ui".to_string(), "picker".to_string()],
+        args: vec![
+            "ui".to_string(),
+            match mode {
+                PickerMode::AllSessions => "picker".to_string(),
+                PickerMode::Worktree => "picker-worktree".to_string(),
+            },
+        ],
     };
     match backend.open_popup(&PopupSpec {
         command,
@@ -618,7 +726,7 @@ fn open_popup_or_run_inline(
     }) {
         Ok(()) => Ok(()),
         Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
-            run_surface(kind, config)
+            run_surface(kind, config, mode)
         }
         Err(error) => Err(Box::new(error)),
     }
@@ -640,7 +748,7 @@ fn open_sidebar_popup_or_run_inline(config: &ResolvedConfig) -> Result<(), Box<d
     }) {
         Ok(()) => Ok(()),
         Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
-            run_surface(SurfaceKind::SidebarCompact, config)
+            run_surface(SurfaceKind::SidebarCompact, config, PickerMode::AllSessions)
         }
         Err(error) => Err(Box::new(error)),
     }
@@ -656,10 +764,15 @@ fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn Error>> {
+fn run_surface(
+    kind: SurfaceKind,
+    config: &ResolvedConfig,
+    mode: PickerMode,
+) -> Result<(), Box<dyn Error>> {
     let state = load_domain_state()?;
-    let mut session_items = derive_session_list(&state, Some("default"));
     let mut session_sort = config.ui.session_sort;
+    let (mut session_items, mut pending_branch_names, mut branch_status_updates) =
+        rebuild_session_items_for_picker_mode(&state, Some(DEFAULT_CLIENT_ID), mode, session_sort);
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
     let mut details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
@@ -673,12 +786,18 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         Some(runtime) => load_sidebar_ui_state(&runtime.session_name)?,
         None => None,
     };
-    if let Some(state) = &saved_sidebar_state
-        && let Some(saved_sort_mode) = state.sort_mode
+    if let Some(saved_state) = &saved_sidebar_state
+        && let Some(saved_sort_mode) = saved_state.sort_mode
     {
         session_sort = saved_sort_mode;
+        (session_items, pending_branch_names, branch_status_updates) =
+            rebuild_session_items_for_picker_mode(
+                &state,
+                Some(DEFAULT_CLIENT_ID),
+                mode,
+                session_sort,
+            );
     }
-    apply_session_sort(&mut session_items, session_sort);
     let mut query = saved_sidebar_state
         .as_ref()
         .map(|state| state.query.clone())
@@ -704,10 +823,8 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         .as_ref()
         .map(|state| state.kind)
         .unwrap_or(kind);
+    let mut picker_mode = mode;
     let mut first_frame = true;
-    let mut pending_branch_names = git_work_items(&state);
-    let branch_status_updates =
-        spawn_git_status_workers(pending_branch_names.iter().cloned().collect());
     let mut deferred_branch_status = BTreeMap::new();
 
     enable_raw_mode()?;
@@ -801,6 +918,7 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
             preview: preview.clone(),
             kind: surface_kind,
             bindings: bindings.clone(),
+            mode: picker_mode,
         };
 
         terminal.draw(|frame| {
@@ -830,7 +948,7 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
         }
 
         if let Some(work_item) = pending_branch_names.pop_front() {
-            if let Some(branch_name) = branch_name_for_directory(&work_item.path) {
+            if let Some(branch_name) = git::branch_name_for_directory(&work_item.path) {
                 update_branch_name(&mut session_items, &work_item.session_id, branch_name);
                 if let Some(update) = deferred_branch_status.remove(&work_item.session_id) {
                     update_branch_status(
@@ -974,10 +1092,14 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
 
                         tmux.rename_session(&session_id, &new_name)?;
                         let reloaded_state = load_domain_state()?;
-                        session_items = derive_session_list(&reloaded_state, Some("default"));
-                        apply_session_sort(&mut session_items, session_sort);
+                        (session_items, pending_branch_names, branch_status_updates) =
+                            rebuild_session_items_for_picker_mode(
+                                &reloaded_state,
+                                Some(DEFAULT_CLIENT_ID),
+                                picker_mode,
+                                session_sort,
+                            );
                         details_preview_provider.state = reloaded_state.clone();
-                        pending_branch_names = git_work_items(&reloaded_state);
                         deferred_branch_status.clear();
                         query = filter_query.clone();
                         input_mode = InputMode::Filter;
@@ -1000,6 +1122,11 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                 UiIntent::RenameSession => {
                     if matches!(input_mode, InputMode::Filter)
                         && let Some(item) = filtered.get(selected)
+                        && matches!(
+                            item.kind,
+                            wisp_core::SessionListItemKind::Session
+                                | wisp_core::SessionListItemKind::WorktreeSession
+                        )
                     {
                         input_mode = InputMode::Rename {
                             session_id: item.session_id.clone(),
@@ -1013,10 +1140,24 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                 UiIntent::CloseSession => {
                     if matches!(input_mode, InputMode::Filter)
                         && let Some(item) = filtered.get(selected)
+                        && matches!(
+                            item.kind,
+                            wisp_core::SessionListItemKind::Session
+                                | wisp_core::SessionListItemKind::WorktreeSession
+                        )
                     {
                         let session_id = item.session_id.clone();
                         tmux.kill_session(&session_id)?;
-                        session_items.retain(|session| session.session_id != session_id);
+                        let reloaded_state = load_domain_state()?;
+                        (session_items, pending_branch_names, branch_status_updates) =
+                            rebuild_session_items_for_picker_mode(
+                                &reloaded_state,
+                                Some(DEFAULT_CLIENT_ID),
+                                picker_mode,
+                                session_sort,
+                            );
+                        details_preview_provider.state = reloaded_state.clone();
+                        deferred_branch_status.clear();
                         preview_session_id = None;
                         preview_refreshed_at = None;
                         if preview_enabled {
@@ -1043,6 +1184,28 @@ fn run_surface(kind: SurfaceKind, config: &ResolvedConfig) -> Result<(), Box<dyn
                         preview_refreshed_at = None;
                     }
                 },
+                UiIntent::ToggleWorktreeMode => {
+                    if matches!(input_mode, InputMode::Filter) {
+                        picker_mode = match picker_mode {
+                            PickerMode::AllSessions => PickerMode::Worktree,
+                            PickerMode::Worktree => PickerMode::AllSessions,
+                        };
+
+                        let reloaded_state = load_domain_state()?;
+                        (session_items, pending_branch_names, branch_status_updates) =
+                            rebuild_session_items_for_picker_mode(
+                                &reloaded_state,
+                                Some(DEFAULT_CLIENT_ID),
+                                picker_mode,
+                                session_sort,
+                            );
+                        details_preview_provider.state = reloaded_state.clone();
+                        deferred_branch_status.clear();
+                        selected = 0;
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                    }
+                }
             }
 
             if let Some(runtime) = &sidebar_runtime
@@ -1084,6 +1247,7 @@ fn picker_bindings(config: &ResolvedConfig) -> KeyBindings {
         ctrl_m: ui_intent_for_action(config.actions.ctrl_m),
         esc: ui_intent_for_action(config.actions.esc),
         ctrl_c: ui_intent_for_action(config.actions.ctrl_c),
+        ctrl_w: ui_intent_for_action(config.actions.ctrl_w),
     }
 }
 
@@ -1101,6 +1265,7 @@ fn ui_intent_for_action(action: KeyAction) -> UiIntent {
         KeyAction::ToggleDetails => UiIntent::ToggleDetails,
         KeyAction::ToggleCompactSidebar => UiIntent::ToggleCompactSidebar,
         KeyAction::Close => UiIntent::Close,
+        KeyAction::ToggleWorktreeMode => UiIntent::ToggleWorktreeMode,
     }
 }
 
@@ -1114,13 +1279,43 @@ fn preview_line_budget(
 }
 
 fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> Vec<String> {
-    provider
-        .generate(&PreviewRequest::SessionSummary {
-            key: PreviewKey::Session(item.session_id.clone()),
-            session_name: item.session_id.clone(),
-        })
-        .map(|content| content.body)
-        .unwrap_or_else(|error| vec![error.to_string()])
+    match item.kind {
+        wisp_core::SessionListItemKind::Info => vec![item.label.clone()],
+        wisp_core::SessionListItemKind::Worktree => {
+            // For worktrees without sessions, show directory listing or "not an active session"
+            if let Some(path) = &item.worktree_path {
+                provider
+                    .generate(&PreviewRequest::Directory {
+                        key: PreviewKey::Directory(path.clone()),
+                        path: path.clone(),
+                    })
+                    .map(|content| content.body)
+                    .unwrap_or_else(|_| vec!["not an active session".to_string()])
+            } else {
+                vec!["not an active session".to_string()]
+            }
+        }
+        wisp_core::SessionListItemKind::WorktreeSession => {
+            // For sessions in worktrees, show the session preview (tmux capture)
+            provider
+                .generate(&PreviewRequest::SessionSummary {
+                    key: PreviewKey::Session(item.session_id.clone()),
+                    session_name: item.session_id.clone(),
+                })
+                .map(|content| content.body)
+                .unwrap_or_else(|error| vec![error.to_string()])
+        }
+        _ => {
+            // For regular sessions
+            provider
+                .generate(&PreviewRequest::SessionSummary {
+                    key: PreviewKey::Session(item.session_id.clone()),
+                    session_name: item.session_id.clone(),
+                })
+                .map(|content| content.body)
+                .unwrap_or_else(|error| vec![error.to_string()])
+        }
+    }
 }
 
 fn sidebar_surface_command(program: PathBuf) -> PopupCommand {
@@ -1399,6 +1594,45 @@ fn git_work_items(state: &DomainState) -> VecDeque<GitWorkItem> {
         .collect()
 }
 
+fn git_work_items_for_worktree_items(items: &[SessionListItem]) -> VecDeque<GitWorkItem> {
+    items
+        .iter()
+        .filter_map(|item| {
+            matches!(
+                item.kind,
+                wisp_core::SessionListItemKind::Worktree
+                    | wisp_core::SessionListItemKind::WorktreeSession
+            )
+            .then(|| item.worktree_path.as_ref())
+            .flatten()
+            .map(|path| GitWorkItem {
+                session_id: item.session_id.clone(),
+                path: path.clone(),
+            })
+        })
+        .collect()
+}
+
+fn picker_info_item(message: &str) -> SessionListItem {
+    SessionListItem {
+        session_id: format!("info:{message}"),
+        label: message.to_string(),
+        kind: wisp_core::SessionListItemKind::Info,
+        is_current: false,
+        is_previous: false,
+        last_activity: None,
+        attached: false,
+        attention: wisp_core::AttentionBadge::None,
+        attention_count: 0,
+        active_window_label: None,
+        path_hint: None,
+        command_hint: None,
+        git_branch: None,
+        worktree_path: None,
+        worktree_branch: None,
+    }
+}
+
 fn spawn_git_status_workers(work_items: Vec<GitWorkItem>) -> mpsc::Receiver<GitStatusUpdate> {
     let (sender, receiver) = mpsc::channel();
     let queue = Arc::new(Mutex::new(VecDeque::from(work_items)));
@@ -1417,7 +1651,7 @@ fn spawn_git_status_workers(work_items: Vec<GitWorkItem>) -> mpsc::Receiver<GitS
                     break;
                 };
 
-                if let Some((sync, dirty)) = branch_status_for_directory(&work_item.path) {
+                if let Some((sync, dirty)) = git::branch_status_for_directory(&work_item.path) {
                     let _ = sender.send(GitStatusUpdate {
                         session_id: work_item.session_id,
                         sync,
@@ -1430,6 +1664,18 @@ fn spawn_git_status_workers(work_items: Vec<GitWorkItem>) -> mpsc::Receiver<GitS
 
     drop(sender);
     receiver
+}
+
+fn stable_path_hash(path: &Path) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    path.to_string_lossy()
+        .as_bytes()
+        .iter()
+        .fold(FNV_OFFSET_BASIS, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+        })
 }
 
 fn update_branch_name(items: &mut [SessionListItem], session_id: &str, branch_name: String) {
@@ -1465,81 +1711,6 @@ fn update_branch_status(
     {
         branch.sync = sync;
         branch.dirty = dirty;
-    }
-}
-
-fn branch_status_for_directory(path: &Path) -> Option<(GitBranchSync, bool)> {
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["status", "--porcelain=2", "--branch"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut upstream = None;
-    let mut ahead = 0usize;
-    let mut dirty = false;
-
-    for line in stdout.lines() {
-        if let Some(remote) = line.strip_prefix("# branch.upstream ") {
-            upstream = Some(remote.to_string());
-        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
-            let mut parts = ab.split_whitespace();
-            let ahead_raw = parts.next().and_then(|part| part.strip_prefix('+'));
-            ahead = ahead_raw
-                .and_then(|part| part.parse::<usize>().ok())
-                .unwrap_or(0);
-        } else if !line.starts_with("# ") && !line.is_empty() {
-            dirty = true;
-        }
-    }
-
-    let sync = if upstream.is_none() || ahead > 0 {
-        GitBranchSync::NotPushed
-    } else {
-        GitBranchSync::Pushed
-    };
-
-    Some((sync, dirty))
-}
-
-fn branch_name_for_directory(path: &Path) -> Option<String> {
-    path.ancestors().find_map(branch_name_for_git_root)
-}
-
-fn branch_name_for_git_root(path: &Path) -> Option<String> {
-    let git_dir = resolve_git_dir(path)?;
-    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-
-    if let Some(reference) = head.strip_prefix("ref: ") {
-        return reference.rsplit('/').next().map(ToOwned::to_owned);
-    }
-
-    Some(head.chars().take(7).collect())
-}
-
-fn resolve_git_dir(path: &Path) -> Option<PathBuf> {
-    let dot_git = path.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git);
-    }
-
-    if !dot_git.is_file() {
-        return None;
-    }
-
-    let pointer = fs::read_to_string(&dot_git).ok()?;
-    let target = pointer.trim().strip_prefix("gitdir: ")?;
-    let git_dir = Path::new(target);
-    if git_dir.is_absolute() {
-        Some(git_dir.to_path_buf())
-    } else {
-        Some(path.join(git_dir))
     }
 }
 
@@ -2233,6 +2404,75 @@ mod tests {
     }
 
     #[test]
+    fn activate_filter_selection_creates_session_for_worktree_rows() {
+        let tmux = StubTmuxClient::default();
+        let zoxide = StubZoxideProvider::default();
+        let filtered = vec![wisp_core::SessionListItem {
+            session_id: "worktree:/tmp/project".to_string(),
+            label: "project".to_string(),
+            kind: wisp_core::SessionListItemKind::Worktree,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: Some("/tmp/project".to_string()),
+            command_hint: None,
+            git_branch: None,
+            worktree_path: Some(PathBuf::from("/tmp/project")),
+            worktree_branch: Some("feature/demo".to_string()),
+        }];
+
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &filtered,
+                0,
+                "",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("worktree selection should create or switch")
+        );
+        assert!(tmux.switched_sessions.borrow().is_empty());
+        let created = tmux.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        assert!(created[0].0.starts_with("project-"));
+        assert_eq!(created[0].1, PathBuf::from("/tmp/project"));
+    }
+
+    #[test]
+    fn create_session_from_worktree_path_uses_unique_names_for_same_leaf_directories() {
+        let tmux = StubTmuxClient::default();
+
+        crate::create_session_from_worktree_path(&tmux, Path::new("/tmp/repo-a/project"))
+            .expect("first worktree should create");
+        crate::create_session_from_worktree_path(&tmux, Path::new("/var/repo-b/project"))
+            .expect("second worktree should create");
+
+        let created = tmux.created_sessions.borrow();
+        assert_eq!(created.len(), 2);
+        assert_ne!(created[0].0, created[1].0);
+        assert!(created[0].0.starts_with("project-"));
+        assert!(created[1].0.starts_with("project-"));
+    }
+
+    #[test]
+    fn stable_path_hash_is_deterministic() {
+        assert_eq!(
+            crate::stable_path_hash(Path::new("/tmp/repo-a/project")),
+            crate::stable_path_hash(Path::new("/tmp/repo-a/project"))
+        );
+        assert_ne!(
+            crate::stable_path_hash(Path::new("/tmp/repo-a/project")),
+            crate::stable_path_hash(Path::new("/tmp/repo-b/project"))
+        );
+    }
+
+    #[test]
     fn applies_session_sort_modes_and_keeps_current_discoverable() {
         let mut items = vec![
             session_item_with_flags("beta", false, true, Some(2)),
@@ -2270,6 +2510,19 @@ mod tests {
         assert_eq!(filtered[0].session_id, "alpha");
     }
 
+    #[test]
+    fn session_items_for_picker_mode_returns_info_item_when_not_in_git_repo() {
+        let items = crate::session_items_for_picker_mode(
+            &wisp_core::DomainState::default(),
+            Some(crate::DEFAULT_CLIENT_ID),
+            wisp_core::PickerMode::Worktree,
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, wisp_core::SessionListItemKind::Info);
+        assert_eq!(items[0].label, "not in a git repository");
+    }
+
     fn session_item(session_id: &str) -> wisp_core::SessionListItem {
         session_item_with_flags(session_id, false, false, None)
     }
@@ -2283,6 +2536,7 @@ mod tests {
         wisp_core::SessionListItem {
             session_id: session_id.to_string(),
             label: session_id.to_string(),
+            kind: wisp_core::SessionListItemKind::Session,
             is_current,
             is_previous,
             last_activity,
@@ -2293,6 +2547,8 @@ mod tests {
             path_hint: None,
             command_hint: None,
             git_branch: None,
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 
