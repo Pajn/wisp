@@ -107,6 +107,11 @@ fn statusline_render_command_prints_status_output() {
         .output()
         .expect("run statusline render");
 
+    if !output.status.success() {
+        eprintln!("statusline render failed!");
+        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    }
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("󰖔"));
