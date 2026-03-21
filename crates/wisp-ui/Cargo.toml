@@ -1,13 +1,17 @@
 [package]
 name = "wisp-ui"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shared terminal UI renderers for Wisp"
 
 [dependencies]
 crossterm.workspace = true
 ratatui.workspace = true
-wisp-core = { path = "../wisp-core" }
-wisp-fuzzy = { path = "../wisp-fuzzy" }
+wisp-core.workspace = true
+wisp-fuzzy.workspace = true
 
 [lints]
 workspace = true

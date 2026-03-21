@@ -1174,17 +1174,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wisp-app"
-version = "0.1.0"
-dependencies = [
- "wisp-config",
- "wisp-core",
- "wisp-tmux",
- "wisp-zoxide",
-]
-
-[[package]]
-name = "wisp-bin"
+name = "wisp"
 version = "0.1.0"
 dependencies = [
  "argh",
@@ -1198,6 +1188,16 @@ dependencies = [
  "wisp-status",
  "wisp-tmux",
  "wisp-ui",
+ "wisp-zoxide",
+]
+
+[[package]]
+name = "wisp-app"
+version = "0.1.0"
+dependencies = [
+ "wisp-config",
+ "wisp-core",
+ "wisp-tmux",
  "wisp-zoxide",
 ]
 
