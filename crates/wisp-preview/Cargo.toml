@@ -1,12 +1,16 @@
 [package]
 name = "wisp-preview"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "preview generation and caching for Wisp"
 
 [dependencies]
 thiserror.workspace = true
-wisp-core = { path = "../wisp-core" }
-wisp-tmux = { path = "../wisp-tmux" }
+wisp-core.workspace = true
+wisp-tmux.workspace = true
 
 [lints]
 workspace = true

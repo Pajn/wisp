@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Wisp is a Rust 2024 tmux navigation workspace built around one canonical session model in `wisp-core`, thin integration adapters (`wisp-tmux`, `wisp-zoxide`, `wisp-preview`), and multiple projections/renderers (`wisp-ui`, `wisp-status`, `wisp-bin`). Keep logic in the lowest pure crate that can own it.
+Wisp is a Rust 2024 tmux navigation workspace built around one canonical session model in `wisp-core`, thin integration adapters (`wisp-tmux`, `wisp-zoxide`, `wisp-preview`), and multiple projections/renderers (`wisp-ui`, `wisp-status`, `wisp`). Keep logic in the lowest pure crate that can own it.
 
 ## Testing expectations
 
@@ -9,7 +9,7 @@ Wisp is a Rust 2024 tmux navigation workspace built around one canonical session
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   - `cargo test --workspace --all-targets`
 - If you touch tmux integration, run the real isolated-socket tests in `crates/wisp-tmux/tests/integration.rs`.
-- If you touch CLI behavior, run `cargo test -p wisp-bin --test smoke`.
+- If you touch CLI behavior, run `cargo test -p wisp --test smoke`.
 - If you touch hot-path projections or status formatting, make sure the benches still compile.
 
 ## Performance expectations

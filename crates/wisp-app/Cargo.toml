@@ -1,13 +1,17 @@
 [package]
 name = "wisp-app"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "application state assembly for Wisp"
 
 [dependencies]
-wisp-config = { path = "../wisp-config" }
-wisp-core = { path = "../wisp-core" }
-wisp-tmux = { path = "../wisp-tmux" }
-wisp-zoxide = { path = "../wisp-zoxide" }
+wisp-config.workspace = true
+wisp-core.workspace = true
+wisp-tmux.workspace = true
+wisp-zoxide.workspace = true
 
 [lints]
 workspace = true

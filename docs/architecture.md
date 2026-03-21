@@ -43,13 +43,13 @@ These crates consume projections rather than owning session state directly.
 
 ### 4. Runtime wiring
 
-`wisp-app` assembles candidate sources into domain state, while the `wisp-bin` crate powers the installed `wisp` CLI that loads config, creates adapters, runs TUI surfaces, and exposes top-level commands like `doctor`, `popup`, `sidebar-pane`, and `status-line`.
+`wisp-app` assembles candidate sources into domain state, while the `wisp` crate powers the installed CLI that loads config, creates adapters, runs TUI surfaces, and exposes top-level commands like `doctor`, `popup`, `sidebar-pane`, and `status-line`.
 
 ## Data flow
 
 Typical flow:
 
-1. `wisp-bin` loads config and asks `wisp-tmux` for a snapshot.
+1. `wisp` loads config and asks `wisp-tmux` for a snapshot.
 2. `wisp-zoxide` contributes directory data.
 3. `wisp-app` builds domain state.
 4. `wisp-core` derives session lists, candidates, previews, and status projections.

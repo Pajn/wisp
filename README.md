@@ -23,7 +23,7 @@ Wisp is a native Rust tmux navigation tool inspired by `tmux-sessionx`. It share
 - `wisp-ui`: shared ratatui renderers and key translation
 - `wisp-status`: status-line formatting and dedup logic
 - `wisp-app`: app-facing state assembly helpers
-- `wisp-bin`: CLI entrypoint and runtime wiring
+- `wisp`: CLI entrypoint and runtime wiring
 
 ## Quick start
 
@@ -39,10 +39,22 @@ Install the CLI:
 cargo install --git https://github.com/Pajn/wisp.git --bin wisp
 ```
 
+Install the latest tagged binary with `cargo-binstall`:
+
+```bash
+cargo binstall --git https://github.com/Pajn/wisp.git wisp
+```
+
 If you want a specific revision while the project is evolving, pin a branch, tag, or commit:
 
 ```bash
 cargo install --git https://github.com/Pajn/wisp.git --bin wisp --branch main
+```
+
+For a specific tagged release with `cargo-binstall`, pin the tag:
+
+```bash
+cargo binstall --git https://github.com/Pajn/wisp.git wisp --tag v0.1.0
 ```
 
 Common commands after install:
@@ -111,7 +123,7 @@ Config file discovery:
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
-cargo test -p wisp-bin --test smoke
+cargo test -p wisp --test smoke
 cargo bench -p wisp-core --bench projections --no-run
 cargo bench -p wisp-status --bench formatting --no-run
 ```

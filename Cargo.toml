@@ -17,6 +17,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
+repository = "https://github.com/Pajn/wisp"
 publish = false
 
 [workspace.lints.rust]
@@ -38,3 +39,12 @@ serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1"
 thiserror = "2"
 toml = "0.8"
+wisp-app = { version = "0.1.0", path = "crates/wisp-app" }
+wisp-config = { version = "0.1.0", path = "crates/wisp-config" }
+wisp-core = { version = "0.1.0", path = "crates/wisp-core" }
+wisp-fuzzy = { version = "0.1.0", path = "crates/wisp-fuzzy" }
+wisp-preview = { version = "0.1.0", path = "crates/wisp-preview" }
+wisp-status = { version = "0.1.0", path = "crates/wisp-status" }
+wisp-tmux = { version = "0.1.0", path = "crates/wisp-tmux" }
+wisp-ui = { version = "0.1.0", path = "crates/wisp-ui" }
+wisp-zoxide = { version = "0.1.0", path = "crates/wisp-zoxide" }
