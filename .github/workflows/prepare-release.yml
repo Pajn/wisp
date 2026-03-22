@@ -1,0 +1,62 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version in X.Y.Z form
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-prepare-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    name: Prepare release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90
+          components: clippy, rustfmt
+
+      - name: Install tmux
+        run: |
+          sudo apt-get update && sudo apt-get install -y tmux
+          tmux new-session -d
+
+      - name: Cache cargo artifacts
+        uses: swatinem/rust-cache@v2
+
+      - name: Prepare release commit
+        run: scripts/release.sh prepare "${{ inputs.version }}"
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit release version
+        run: |
+          git commit -am "release: v${{ inputs.version }}"
+
+      - name: Create release tag
+        run: git tag "v${{ inputs.version }}"
+
+      - name: Push release commit and tag
+        run: |
+          git push origin HEAD:main
+          git push origin "v${{ inputs.version }}"

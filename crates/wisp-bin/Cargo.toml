@@ -12,13 +12,13 @@ name = "wisp"
 path = "src/main.rs"
 
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ bin }-{ target }.{ archive-format }"
-pkg-fmt = "tar.gz"
-bin-dir = "{ bin }{ binary-ext }"
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive-format }"
+pkg-fmt = "tgz"
+bin-dir = "{ name }{ binary-ext }"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
-bin-dir = "{ bin }.exe"
+bin-dir = "{ name }.exe"
 
 [dependencies]
 argh = "0.1"
