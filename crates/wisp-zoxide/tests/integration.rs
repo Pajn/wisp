@@ -2,17 +2,34 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
 
+static UNIQUE_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn unique_root() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be valid")
-        .as_nanos();
-    std::env::temp_dir().join(format!("wisp-zoxide-test-{nonce}"))
+    let base = std::env::temp_dir();
+    let pid = std::process::id();
+
+    for _ in 0..1024 {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be valid")
+            .as_nanos();
+        let attempt = UNIQUE_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = base.join(format!("wisp-zoxide-test-{pid}-{nonce}-{attempt}"));
+
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => panic!("failed to create temporary test root {root:?}: {err}"),
+        }
+    }
+
+    panic!("failed to allocate a unique temporary test root");
 }
 
 fn write_fake_zoxide_script(script: &Path, contents: String) {
