@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "wisp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argh",
  "crossterm",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wisp-config",
  "wisp-core",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_ignored",
@@ -1213,18 +1213,18 @@ dependencies = [
 
 [[package]]
 name = "wisp-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "wisp-fuzzy"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "wisp-preview"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
  "wisp-core",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-status"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "wisp-core",
@@ -1241,14 +1241,14 @@ dependencies = [
 
 [[package]]
 name = "wisp-tmux"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "wisp-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-zoxide"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
 ]
