@@ -81,6 +81,7 @@ pub enum SessionListItemKind {
     Session,         // regular tmux session (not in a worktree)
     WorktreeSession, // session running in a worktree
     Worktree,        // worktree with no session
+    Zoxide,          // zoxide directory match
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

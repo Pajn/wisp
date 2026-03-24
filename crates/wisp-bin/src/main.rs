@@ -25,12 +25,16 @@ use wisp_config::{
     CliOverrides, KeyAction, LoadOptions, ResolvedConfig, SessionSortMode, load_config,
 };
 use wisp_core::{
-    DomainState, GitBranchStatus, GitBranchSync, PickerMode, PreviewKey, PreviewRequest,
-    SessionListItem, SessionListSortMode, derive_session_list, derive_session_list_with_worktrees,
-    derive_status_items, sanitize_session_name, sort_session_list_items,
+    DomainState, GitBranchStatus, GitBranchSync, PickerMode, PreviewContent, PreviewKey,
+    PreviewRequest, SessionListItem, SessionListSortMode, derive_session_list,
+    derive_session_list_with_worktrees, derive_status_items, sanitize_session_name,
+    sort_session_list_items,
 };
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
-use wisp_preview::{ActivePanePreviewProvider, PreviewProvider, SessionDetailsPreviewProvider};
+use wisp_preview::{
+    ActivePanePreviewProvider, FilesystemPreviewProvider, PreviewProvider,
+    SessionDetailsPreviewProvider,
+};
 use wisp_status::{StatusFormatOptions, StatusRenderMode, render_status_line};
 use wisp_tmux::{
     CommandTmuxClient, PollingTmuxBackend, PopupCommand, PopupOptions, PopupSpec, SidebarPaneSpec,
@@ -52,6 +56,35 @@ const STATUSLINE_REFRESH_HOOKS: &[&str] = &[
     "session-renamed[200]",
 ];
 const STATUSLINE_REFRESH_COMMAND: &str = "refresh-client -S";
+
+struct CombinedPreviewProvider<'a> {
+    pane: &'a ActivePanePreviewProvider<CommandTmuxClient>,
+    filesystem: &'a FilesystemPreviewProvider,
+}
+
+impl PreviewProvider for CombinedPreviewProvider<'_> {
+    fn can_preview(&self, request: &PreviewRequest) -> bool {
+        matches!(
+            request,
+            PreviewRequest::Directory { .. }
+                | PreviewRequest::File { .. }
+                | PreviewRequest::Metadata { .. }
+                | PreviewRequest::SessionSummary { .. }
+        )
+    }
+
+    fn generate(
+        &self,
+        request: &PreviewRequest,
+    ) -> Result<PreviewContent, wisp_preview::PreviewError> {
+        match request {
+            PreviewRequest::Directory { .. }
+            | PreviewRequest::File { .. }
+            | PreviewRequest::Metadata { .. } => self.filesystem.generate(request),
+            PreviewRequest::SessionSummary { .. } => self.pane.generate(request),
+        }
+    }
+}
 
 #[derive(Debug, FromArgs, PartialEq)]
 /// Wisp is a tmux navigation workspace.
@@ -611,19 +644,23 @@ fn create_session_from_query(
     Ok(true)
 }
 
-fn create_session_from_worktree_path(
+fn create_session_with_basename(
     tmux: &impl TmuxClient,
-    worktree_path: &Path,
+    basename: &str,
+    path: &Path,
 ) -> Result<bool, Box<dyn Error>> {
-    let normalized_path = worktree_path
-        .canonicalize()
-        .unwrap_or_else(|_| worktree_path.to_path_buf());
-    let session_name = format!(
-        "{}-{:08x}",
-        sanitize_session_name(&normalized_path),
-        stable_path_hash(&normalized_path) as u32
-    );
-    tmux.create_or_switch_session(&session_name, worktree_path)?;
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let existing_sessions = tmux.list_sessions().unwrap_or_default();
+    let session_name = if existing_sessions.iter().any(|s| s.name == basename) {
+        format!(
+            "{}-{:08x}",
+            sanitize_session_name(&canonical_path),
+            stable_path_hash(&canonical_path) as u32
+        )
+    } else {
+        basename.to_string()
+    };
+    tmux.create_or_switch_session(&session_name, &canonical_path)?;
     Ok(true)
 }
 
@@ -690,7 +727,23 @@ fn activate_filter_selection(
             wisp_core::SessionListItemKind::Info => return Ok(false),
             wisp_core::SessionListItemKind::Worktree => {
                 if let Some(worktree_path) = &item.worktree_path {
-                    return create_session_from_worktree_path(tmux, worktree_path);
+                    let basename = worktree_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("worktree");
+                    return create_session_with_basename(tmux, basename, worktree_path);
+                }
+                return Ok(false);
+            }
+            wisp_core::SessionListItemKind::Zoxide => {
+                if let Some(path) = &item.worktree_path {
+                    let folder_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("zoxide");
+                    if !folder_name.is_empty() {
+                        return create_session_with_basename(tmux, folder_name, path);
+                    }
                 }
                 return Ok(false);
             }
@@ -777,6 +830,7 @@ fn run_surface(
     let mut details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
     };
+    let filesystem_preview_provider = FilesystemPreviewProvider::default();
     let tmux = CommandTmuxClient::new();
     let zoxide = CommandZoxideProvider::new();
     let current_directory = env::current_dir()?;
@@ -826,6 +880,8 @@ fn run_surface(
     let mut picker_mode = mode;
     let mut first_frame = true;
     let mut deferred_branch_status = BTreeMap::new();
+    let mut last_zoxide_query: String = String::new();
+    let mut last_zoxide_match: Option<wisp_zoxide::DirectoryEntry> = None;
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -853,10 +909,49 @@ fn run_surface(
             break Ok(());
         }
 
-        let filtered = match input_mode {
+        let mut filtered = match input_mode {
             InputMode::Filter => filter_items(&session_items, &query),
             InputMode::Rename { .. } => session_items.clone(),
         };
+        if matches!(input_mode, InputMode::Filter)
+            && !query.trim().is_empty()
+            && picker_mode == PickerMode::AllSessions
+        {
+            let query_trimmed = query.trim();
+            if query_trimmed != last_zoxide_query.trim() {
+                last_zoxide_query = query_trimmed.to_string();
+                last_zoxide_match = zoxide.query_directory(&query).ok().flatten();
+            }
+            if let Some(zoxide_match) = &last_zoxide_match {
+                let path_display = zoxide_match.path.display().to_string();
+                let basename = zoxide_match
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                filtered.push(SessionListItem {
+                    session_id: format!("zoxide:{}", zoxide_match.path.display()),
+                    label: basename,
+                    kind: wisp_core::SessionListItemKind::Zoxide,
+                    is_current: false,
+                    is_previous: false,
+                    last_activity: None,
+                    attached: false,
+                    attention: wisp_core::AttentionBadge::None,
+                    attention_count: 0,
+                    active_window_label: None,
+                    path_hint: Some(path_display),
+                    command_hint: None,
+                    git_branch: None,
+                    worktree_path: Some(zoxide_match.path.clone()),
+                    worktree_branch: None,
+                });
+            }
+        } else if query.trim().is_empty() {
+            last_zoxide_query.clear();
+            last_zoxide_match = None;
+        }
         if selected >= filtered.len() {
             selected = filtered.len().saturating_sub(1);
         }
@@ -889,11 +984,12 @@ fn run_surface(
             preview_session_id = None;
             preview_refreshed_at = None;
         } else if should_refresh_preview && let Some(item) = selected_item {
+            let combined_provider = CombinedPreviewProvider {
+                pane: &pane_preview_provider,
+                filesystem: &filesystem_preview_provider,
+            };
             preview = Some(generate_preview(
-                match preview_mode {
-                    PreviewMode::Pane => &pane_preview_provider as &dyn PreviewProvider,
-                    PreviewMode::Details => &details_preview_provider as &dyn PreviewProvider,
-                },
+                &combined_provider as &dyn PreviewProvider,
                 item,
             ));
             preview_session_id = Some(item.session_id.clone());
@@ -1284,13 +1380,18 @@ fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> V
         wisp_core::SessionListItemKind::Worktree => {
             // For worktrees without sessions, show directory listing or "not an active session"
             if let Some(path) = &item.worktree_path {
-                provider
-                    .generate(&PreviewRequest::Directory {
-                        key: PreviewKey::Directory(path.clone()),
-                        path: path.clone(),
-                    })
-                    .map(|content| content.body)
-                    .unwrap_or_else(|_| vec!["not an active session".to_string()])
+                let request = PreviewRequest::Directory {
+                    key: PreviewKey::Directory(path.clone()),
+                    path: path.clone(),
+                };
+                if provider.can_preview(&request) {
+                    provider
+                        .generate(&request)
+                        .map(|content| content.body)
+                        .unwrap_or_else(|_| vec!["not an active session".to_string()])
+                } else {
+                    vec!["preview not supported".to_string()]
+                }
             } else {
                 vec!["not an active session".to_string()]
             }
@@ -1304,6 +1405,26 @@ fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> V
                 })
                 .map(|content| content.body)
                 .unwrap_or_else(|error| vec![error.to_string()])
+        }
+        wisp_core::SessionListItemKind::Zoxide => {
+            // For zoxide matches, show directory preview using worktree_path
+            if let Some(path) = &item.worktree_path {
+                let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let request = PreviewRequest::Directory {
+                    key: PreviewKey::Directory(canonical_path.clone()),
+                    path: canonical_path,
+                };
+                if provider.can_preview(&request) {
+                    provider
+                        .generate(&request)
+                        .map(|content| content.body)
+                        .unwrap_or_else(|_| vec!["directory not found".to_string()])
+                } else {
+                    vec!["preview not supported".to_string()]
+                }
+            } else {
+                vec!["no path available".to_string()]
+            }
         }
         _ => {
             // For regular sessions
@@ -1779,6 +1900,7 @@ mod tests {
         context: TmuxContext,
         windows: Vec<TmuxWindow>,
         panes: Vec<TmuxPane>,
+        existing_sessions: Vec<TmuxSession>,
         created_sessions: RefCell<Vec<(String, PathBuf)>>,
         switched_sessions: RefCell<Vec<String>>,
         opened_targets: RefCell<Vec<String>>,
@@ -1805,6 +1927,11 @@ mod tests {
             self.panes.extend(panes);
             self
         }
+
+        fn with_existing_sessions(mut self, sessions: Vec<TmuxSession>) -> Self {
+            self.existing_sessions = sessions;
+            self
+        }
     }
 
     impl TmuxClient for StubTmuxClient {
@@ -1827,7 +1954,7 @@ mod tests {
         }
 
         fn list_sessions(&self) -> Result<Vec<TmuxSession>, TmuxError> {
-            Ok(Vec::new())
+            Ok(self.existing_sessions.clone())
         }
 
         fn list_windows(&self) -> Result<Vec<TmuxWindow>, TmuxError> {
@@ -2440,24 +2567,258 @@ mod tests {
         assert!(tmux.switched_sessions.borrow().is_empty());
         let created = tmux.created_sessions.borrow();
         assert_eq!(created.len(), 1);
-        assert!(created[0].0.starts_with("project-"));
+        // Uses basename directly since no collision with existing sessions
+        assert_eq!(created[0].0, "project");
         assert_eq!(created[0].1, PathBuf::from("/tmp/project"));
     }
 
     #[test]
-    fn create_session_from_worktree_path_uses_unique_names_for_same_leaf_directories() {
+    fn activate_filter_selection_creates_session_for_zoxide_row() {
         let tmux = StubTmuxClient::default();
+        let zoxide = StubZoxideProvider::default();
+        let filtered = vec![wisp_core::SessionListItem {
+            session_id: "zoxide:/path/to/myproject".to_string(),
+            label: "myproject".to_string(),
+            kind: wisp_core::SessionListItemKind::Zoxide,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: Some("/path/to/myproject".to_string()),
+            command_hint: None,
+            git_branch: None,
+            worktree_path: Some(PathBuf::from("/path/to/myproject")),
+            worktree_branch: None,
+        }];
 
-        crate::create_session_from_worktree_path(&tmux, Path::new("/tmp/repo-a/project"))
-            .expect("first worktree should create");
-        crate::create_session_from_worktree_path(&tmux, Path::new("/var/repo-b/project"))
-            .expect("second worktree should create");
+        // Test with selected=0 (zoxide is first item)
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &filtered,
+                0,
+                "myproject",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("zoxide selection should create or switch")
+        );
+        assert!(tmux.switched_sessions.borrow().is_empty());
+        let created = tmux.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        // Should use the query "myproject" as the session name
+        assert_eq!(created[0].0, "myproject");
+        assert_eq!(created[0].1, PathBuf::from("/path/to/myproject"));
+    }
+
+    #[test]
+    fn activate_filter_selection_zoxide_row_at_end_of_list() {
+        let tmux = StubTmuxClient::default();
+        let zoxide = StubZoxideProvider::default();
+        // Simulate filtered list with existing sessions PLUS zoxide at the end
+        let filtered = vec![
+            wisp_core::SessionListItem {
+                session_id: "session:alpha".to_string(),
+                label: "alpha".to_string(),
+                kind: wisp_core::SessionListItemKind::Session,
+                is_current: false,
+                is_previous: false,
+                last_activity: None,
+                attached: false,
+                attention: wisp_core::AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: None,
+                command_hint: None,
+                git_branch: None,
+                worktree_path: None,
+                worktree_branch: None,
+            },
+            wisp_core::SessionListItem {
+                session_id: "zoxide:/path/to/mlm".to_string(),
+                label: "mlm".to_string(),
+                kind: wisp_core::SessionListItemKind::Zoxide,
+                is_current: false,
+                is_previous: false,
+                last_activity: None,
+                attached: false,
+                attention: wisp_core::AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: Some("/path/to/mlm".to_string()),
+                command_hint: None,
+                git_branch: None,
+                worktree_path: Some(PathBuf::from("/path/to/mlm")),
+                worktree_branch: None,
+            },
+        ];
+
+        // Selected is index 1 (the zoxide item at the end)
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &filtered,
+                1, // selected = 1, pointing to zoxide item
+                "mlm",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("zoxide selection should create or switch")
+        );
+        assert!(tmux.switched_sessions.borrow().is_empty());
+        let created = tmux.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        // Should use the query "mlm" as the session name
+        assert_eq!(created[0].0, "mlm");
+        assert_eq!(created[0].1, PathBuf::from("/path/to/mlm"));
+    }
+
+    #[test]
+    fn activate_filter_selection_zoxide_uses_hash_on_collision() {
+        let tmux = StubTmuxClient::default().with_existing_sessions(vec![TmuxSession {
+            id: "$1".to_string(),
+            name: "myproject".to_string(),
+            attached: false,
+            windows: 1,
+            current: false,
+            last_activity: None,
+        }]);
+        let zoxide = StubZoxideProvider::default();
+        let filtered = vec![wisp_core::SessionListItem {
+            session_id: "zoxide:/path/to/myproject".to_string(),
+            label: "myproject".to_string(),
+            kind: wisp_core::SessionListItemKind::Zoxide,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: Some("/path/to/myproject".to_string()),
+            command_hint: None,
+            git_branch: None,
+            worktree_path: Some(PathBuf::from("/path/to/myproject")),
+            worktree_branch: None,
+        }];
+
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &filtered,
+                0,
+                "myproject",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("zoxide selection should create or switch")
+        );
+        assert!(tmux.switched_sessions.borrow().is_empty());
+        let created = tmux.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        // Should use hash suffix due to collision with existing session
+        assert!(created[0].0.starts_with("myproject-"));
+    }
+
+    #[test]
+    fn create_session_with_basename_avoids_collision() {
+        let tmux = StubTmuxClient::default().with_existing_sessions(vec![TmuxSession {
+            id: "$1".to_string(),
+            name: "project".to_string(),
+            attached: false,
+            windows: 1,
+            current: false,
+            last_activity: None,
+        }]);
+
+        crate::create_session_with_basename(&tmux, "project", Path::new("/tmp/repo-a/project"))
+            .expect("worktree should create with hash suffix");
 
         let created = tmux.created_sessions.borrow();
-        assert_eq!(created.len(), 2);
-        assert_ne!(created[0].0, created[1].0);
+        assert_eq!(created.len(), 1);
+        // Should have hash suffix due to collision with existing session
         assert!(created[0].0.starts_with("project-"));
-        assert!(created[1].0.starts_with("project-"));
+    }
+
+    #[test]
+    fn create_session_with_basename_uses_basename_when_no_collision() {
+        let tmux = StubTmuxClient::default();
+
+        crate::create_session_with_basename(&tmux, "myproject", Path::new("/tmp/repo/myproject"))
+            .expect("worktree should create with basename");
+
+        let created = tmux.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        // Should use basename directly since no collision
+        assert_eq!(created[0].0, "myproject");
+    }
+
+    #[test]
+    fn create_session_with_basename_with_real_directory() {
+        let temp_dir = std::env::temp_dir().join("wisp-test-create-session");
+        fs::create_dir_all(&temp_dir).expect("should create temp dir");
+        fs::write(temp_dir.join("test.txt"), "test").expect("should create file");
+
+        let tmux = StubTmuxClient::default();
+        crate::create_session_with_basename(&tmux, "testsession", &temp_dir)
+            .expect("should work with real directory");
+
+        let created = tmux.created_sessions.borrow();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "testsession");
+        assert_eq!(
+            created[0].1,
+            temp_dir.canonicalize().expect("canonical path")
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn generate_preview_for_zoxide_item_with_real_directory() {
+        use wisp_preview::FilesystemPreviewProvider;
+
+        let temp_dir = std::env::temp_dir().join("wisp-test-preview-zoxide");
+        fs::create_dir_all(&temp_dir).expect("should create temp dir");
+        fs::write(temp_dir.join("file1.txt"), "content1").expect("should create file");
+        fs::write(temp_dir.join("file2.txt"), "content2").expect("should create file");
+
+        let provider = FilesystemPreviewProvider::default();
+        let item = wisp_core::SessionListItem {
+            session_id: "zoxide:/path/to/test".to_string(),
+            label: "test".to_string(),
+            kind: wisp_core::SessionListItemKind::Zoxide,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: Some(temp_dir.to_string_lossy().to_string()),
+            command_hint: None,
+            git_branch: None,
+            worktree_path: Some(temp_dir.clone()),
+            worktree_branch: None,
+        };
+
+        let preview_lines = crate::generate_preview(&provider, &item);
+
+        // Should list directory contents, not show "directory not found"
+        assert!(!preview_lines.is_empty());
+        assert!(
+            !preview_lines
+                .iter()
+                .any(|line| line.contains("not found") || line.contains("no path"))
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]

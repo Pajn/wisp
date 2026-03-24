@@ -206,7 +206,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        time::{SystemTime, UNIX_EPOCH},
+        sync::atomic::{AtomicU64, Ordering},
     };
 
     use wisp_core::GitBranchSync;
@@ -214,11 +214,20 @@ mod tests {
     use super::{branch_name_for_directory, branch_status_for_directory, git_repo_root};
 
     fn unique_root() -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        std::env::temp_dir().join(format!("wisp-git-test-{nonce}"))
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let temp = std::env::temp_dir();
+        let path = temp.join(format!(
+            "wisp-git-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        if let Err(e) = fs::remove_dir_all(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            panic!("failed to remove temp dir {}: {}", path.display(), e);
+        }
+        fs::create_dir_all(&path).expect("create temp root");
+        path
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
