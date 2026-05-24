@@ -101,6 +101,34 @@ fn doctor_command_reports_runtime_environment() {
 }
 
 #[test]
+fn doctor_reports_embers_when_selected_without_a_socket() {
+    let output = Command::new(bin())
+        .arg("doctor")
+        .env("WISP_BACKEND", "embers")
+        // Isolate from any real user config (XDG short-circuits the HOME
+        // fallback) so a local [embers].socket_path can't change the result.
+        .env("XDG_CONFIG_HOME", env!("CARGO_TARGET_TMPDIR"))
+        .env_remove("WISP_EMBERS_SOCKET")
+        .env_remove("EMBERS_SOCKET")
+        .output()
+        .expect("run doctor");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("backend: embers"));
+    #[cfg(feature = "embers")]
+    {
+        assert!(stdout.contains("socket not configured"));
+        assert!(stdout.contains("event strategy: SubscriptionStream"));
+    }
+    #[cfg(not(feature = "embers"))]
+    {
+        assert!(stdout.contains("support not compiled in"));
+        assert!(stdout.contains("event strategy: Disabled"));
+    }
+}
+
+#[test]
 fn statusline_render_command_prints_status_output() {
     let output = Command::new(bin())
         .args(["statusline", "render"])
@@ -115,4 +143,23 @@ fn statusline_render_command_prints_status_output() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("󰖔"));
+}
+
+#[test]
+fn embers_statusline_reports_not_supported_before_connecting() {
+    let output = Command::new(bin())
+        .args(["statusline", "render"])
+        .env("WISP_BACKEND", "embers")
+        // Isolate from any real user config (XDG short-circuits the HOME
+        // fallback) so a local [embers].socket_path can't change the result.
+        .env("XDG_CONFIG_HOME", env!("CARGO_TARGET_TMPDIR"))
+        .env_remove("WISP_EMBERS_SOCKET")
+        .env_remove("EMBERS_SOCKET")
+        .output()
+        .expect("run statusline render");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not supported on the embers backend yet"));
+    assert!(!stderr.contains("socket path"));
 }

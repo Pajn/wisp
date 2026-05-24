@@ -2,13 +2,24 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use wisp_zoxide::{CommandZoxideProvider, ZoxideProvider};
 
 static UNIQUE_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes writing and then executing the fake `zoxide` binaries. These tests
+/// run as parallel threads in one process; if one test's `fs::write` still holds
+/// a writable fd while another test's `Command` spawn `fork()`s, the child
+/// inherits that fd and the freshly written binary fails to exec with ETXTBSY
+/// ("Text file busy"). Holding this guard across each test's write+exec prevents
+/// the overlap.
+static EXEC_GUARD: Mutex<()> = Mutex::new(());
 
 fn unique_root() -> PathBuf {
     let base = std::env::temp_dir();
@@ -46,6 +57,9 @@ fn write_fake_zoxide_script(script: &Path, contents: String) {
 
 #[test]
 fn loads_entries_from_a_fake_zoxide_binary() {
+    let _guard = EXEC_GUARD
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let root = unique_root();
     let bin_dir = root.join("bin");
     let workspace = root.join("workspace");
@@ -76,6 +90,9 @@ fn loads_entries_from_a_fake_zoxide_binary() {
 
 #[test]
 fn queries_the_best_matching_directory() {
+    let _guard = EXEC_GUARD
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let root = unique_root();
     let bin_dir = root.join("bin");
     let workspace = root.join("workspace");

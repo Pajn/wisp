@@ -7,6 +7,8 @@ use wisp_core::{
     WindowRecord, deduplicate_candidates, derive_candidates, preview_request_for_candidate,
     resolve_action, sort_candidates,
 };
+#[cfg(feature = "embers")]
+use wisp_embers::{EmbersPane, EmbersSnapshot};
 use wisp_tmux::TmuxSnapshot;
 use wisp_zoxide::DirectoryEntry;
 
@@ -109,8 +111,15 @@ impl Default for CandidateBuildOptions {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum BackendSnapshot {
+    Tmux(TmuxSnapshot),
+    #[cfg(feature = "embers")]
+    Embers(EmbersSnapshot),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CandidateSources {
-    pub tmux: TmuxSnapshot,
+    pub backend: BackendSnapshot,
     pub zoxide: Vec<DirectoryEntry>,
 }
 
@@ -290,13 +299,44 @@ pub fn rebuild_candidates(
 
 #[must_use]
 pub fn build_domain_state(sources: &CandidateSources) -> DomainState {
-    let sessions = sources
-        .tmux
+    let (sessions, clients, previous_session_by_client) = match &sources.backend {
+        BackendSnapshot::Tmux(snapshot) => build_tmux_state(snapshot),
+        #[cfg(feature = "embers")]
+        BackendSnapshot::Embers(snapshot) => build_embers_state(snapshot),
+    };
+    let directories = sources
+        .zoxide
+        .iter()
+        .map(|entry| DirectoryRecord {
+            path: entry.path.clone(),
+            score: entry.score,
+            exists: entry.exists,
+        })
+        .collect();
+
+    let mut state = DomainState {
+        sessions,
+        clients,
+        previous_session_by_client,
+        directories,
+        config: Default::default(),
+    };
+    state.recompute_aggregates();
+    state
+}
+
+fn build_tmux_state(
+    snapshot: &TmuxSnapshot,
+) -> (
+    std::collections::BTreeMap<String, SessionRecord>,
+    std::collections::BTreeMap<String, ClientFocus>,
+    std::collections::BTreeMap<String, String>,
+) {
+    let sessions = snapshot
         .sessions
         .iter()
         .map(|session| {
-            let windows = sources
-                .tmux
+            let windows = snapshot
                 .windows
                 .iter()
                 .filter(|window| window.session_name == session.name)
@@ -338,7 +378,7 @@ pub fn build_domain_state(sources: &CandidateSources) -> DomainState {
                 session.name.clone(),
                 SessionRecord {
                     id: session.name.clone(),
-                    tmux_id: Some(session.id.clone()),
+                    native_id: Some(session.id.clone()),
                     name: session.name.clone(),
                     attached: session.attached,
                     windows,
@@ -351,43 +391,156 @@ pub fn build_domain_state(sources: &CandidateSources) -> DomainState {
             )
         })
         .collect();
-    let clients = sources
-        .tmux
+    let clients = snapshot
         .context
         .session_name
         .as_ref()
-        .zip(sources.tmux.context.window_index)
+        .zip(snapshot.context.window_index)
         .map(|(session_name, window_index)| {
             (
                 "default".to_string(),
                 ClientFocus {
                     session_id: session_name.clone(),
                     window_id: format!("{session_name}:{window_index}"),
-                    pane_id: sources.tmux.context.pane_id.clone(),
+                    // Use the same synthetic pane id as the projected panes
+                    // (`session:window.1`) so the focus record resolves against
+                    // WindowRecord.panes, rather than the raw tmux pane id.
+                    pane_id: snapshot
+                        .context
+                        .pane_id
+                        .as_ref()
+                        .map(|_| format!("{session_name}:{window_index}.1")),
                 },
             )
         })
         .into_iter()
         .collect();
-    let directories = sources
-        .zoxide
+    (sessions, clients, Default::default())
+}
+
+#[cfg(feature = "embers")]
+fn build_embers_state(
+    snapshot: &EmbersSnapshot,
+) -> (
+    std::collections::BTreeMap<String, SessionRecord>,
+    std::collections::BTreeMap<String, ClientFocus>,
+    std::collections::BTreeMap<String, String>,
+) {
+    // Group panes by (session, window) once so window projection is linear in the
+    // pane count rather than rescanning the full panes vector per (session, window).
+    let mut panes_by_window: std::collections::BTreeMap<(&str, u32), Vec<&EmbersPane>> =
+        std::collections::BTreeMap::new();
+    for pane in &snapshot.panes {
+        panes_by_window
+            .entry((pane.session_name.as_str(), pane.window_index))
+            .or_default()
+            .push(pane);
+    }
+    let sessions = snapshot
+        .sessions
         .iter()
-        .map(|entry| DirectoryRecord {
-            path: entry.path.clone(),
-            score: entry.score,
-            exists: entry.exists,
+        .map(|session| {
+            let windows = snapshot
+                .windows
+                .iter()
+                .filter(|window| window.session_name == session.name)
+                .map(|window| {
+                    let window_id = format!("{}:{}", session.name, window.index);
+                    let panes = panes_by_window
+                        .get(&(session.name.as_str(), window.index))
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                        .map(|(pane_index, pane)| {
+                            (
+                                pane.pane_id.clone(),
+                                PaneRecord {
+                                    id: pane.pane_id.clone(),
+                                    index: (pane_index + 1) as i32,
+                                    title: Some(pane.title.clone()),
+                                    current_path: pane.current_path.clone(),
+                                    current_command: pane.current_command.clone(),
+                                    is_active: pane.active,
+                                },
+                            )
+                        })
+                        .collect();
+                    (
+                        window_id.clone(),
+                        WindowRecord {
+                            id: window_id,
+                            index: window.index as i32,
+                            name: window.name.clone(),
+                            active: window.active,
+                            panes,
+                            alerts: AlertState {
+                                activity: window.activity,
+                                bell: window.bell,
+                                silence: window.silence,
+                                unseen_output: false,
+                            },
+                            has_unseen: false,
+                            current_path: window.current_path.clone(),
+                            active_command: window.current_command.clone(),
+                        },
+                    )
+                })
+                .collect();
+
+            (
+                session.name.clone(),
+                SessionRecord {
+                    id: session.name.clone(),
+                    native_id: Some(session.native_id.clone()),
+                    name: session.name.clone(),
+                    attached: session.attached,
+                    windows,
+                    aggregate_alerts: Default::default(),
+                    has_unseen: false,
+                    sort_key: SessionSortKey {
+                        last_activity: session.last_activity,
+                    },
+                },
+            )
         })
         .collect();
-
-    let mut state = DomainState {
-        sessions,
-        clients,
-        previous_session_by_client: Default::default(),
-        directories,
-        config: Default::default(),
-    };
-    state.recompute_aggregates();
-    state
+    let clients = snapshot
+        .context
+        .current_session_name
+        .as_ref()
+        .zip(snapshot.context.current_window_index)
+        .map(|(session_name, window_index)| {
+            let client_id = snapshot
+                .context
+                .client_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            (
+                client_id,
+                ClientFocus {
+                    session_id: session_name.clone(),
+                    window_id: format!("{session_name}:{window_index}"),
+                    pane_id: snapshot.context.pane_id.clone(),
+                },
+            )
+        })
+        .into_iter()
+        .collect();
+    let previous_session_by_client = snapshot
+        .context
+        .previous_session_name
+        .as_ref()
+        .map(|session_name| {
+            let client_id = snapshot
+                .context
+                .client_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            (client_id, session_name.clone())
+        })
+        .into_iter()
+        .collect();
+    (sessions, clients, previous_session_by_client)
 }
 
 #[cfg(test)]
@@ -398,14 +551,18 @@ mod tests {
     use wisp_core::{
         AttentionBadge, Candidate, DirectoryMetadata, PreviewContent, PreviewKey, SessionMetadata,
     };
+    #[cfg(feature = "embers")]
+    use wisp_embers::{
+        EmbersActivityState, EmbersContext, EmbersPane, EmbersSession, EmbersSnapshot, EmbersWindow,
+    };
     use wisp_tmux::{
         TmuxCapabilities, TmuxContext, TmuxSession, TmuxSnapshot, TmuxVersion, TmuxWindow,
     };
     use wisp_zoxide::DirectoryEntry;
 
     use crate::{
-        AppCommand, AppMode, AppState, CandidateBuildOptions, CandidateSources, StatusLevel,
-        UserIntent, build_domain_state, rebuild_candidates,
+        AppCommand, AppMode, AppState, BackendSnapshot, CandidateBuildOptions, CandidateSources,
+        StatusLevel, UserIntent, build_domain_state, rebuild_candidates,
     };
 
     #[test]
@@ -480,7 +637,7 @@ mod tests {
     #[test]
     fn build_domain_state_preserves_tmux_alert_flags() {
         let state = build_domain_state(&CandidateSources {
-            tmux: TmuxSnapshot {
+            backend: BackendSnapshot::Tmux(TmuxSnapshot {
                 context: TmuxContext {
                     session_name: Some("alpha".to_string()),
                     window_index: Some(1),
@@ -516,7 +673,7 @@ mod tests {
                     current_path: Some(PathBuf::from("/tmp")),
                     current_command: Some("bash".to_string()),
                 }],
-            },
+            }),
             zoxide: Vec::new(),
         });
 
@@ -588,7 +745,7 @@ mod tests {
         let existing = std::env::temp_dir().join("wisp-app-candidate-existing");
         std::fs::create_dir_all(&existing).expect("existing directory");
         let sources = CandidateSources {
-            tmux: TmuxSnapshot {
+            backend: BackendSnapshot::Tmux(TmuxSnapshot {
                 context: TmuxContext::default(),
                 capabilities: TmuxCapabilities {
                     version: TmuxVersion {
@@ -610,7 +767,7 @@ mod tests {
                     last_activity: Some(5),
                 }],
                 windows: Vec::new(),
-            },
+            }),
             zoxide: vec![DirectoryEntry {
                 path: existing.clone(),
                 score: Some(10.0),
@@ -644,7 +801,7 @@ mod tests {
     #[test]
     fn omits_missing_zoxide_directories_by_default() {
         let sources = CandidateSources {
-            tmux: TmuxSnapshot {
+            backend: BackendSnapshot::Tmux(TmuxSnapshot {
                 context: TmuxContext::default(),
                 capabilities: TmuxCapabilities {
                     version: TmuxVersion {
@@ -659,7 +816,7 @@ mod tests {
                 },
                 sessions: Vec::new(),
                 windows: Vec::new(),
-            },
+            }),
             zoxide: vec![DirectoryEntry {
                 path: PathBuf::from("/path/that/does/not/exist"),
                 score: Some(99.0),
@@ -670,5 +827,87 @@ mod tests {
         let candidates = rebuild_candidates(&sources, &CandidateBuildOptions::default());
 
         assert!(candidates.is_empty());
+    }
+
+    #[cfg(feature = "embers")]
+    #[test]
+    fn build_domain_state_projects_embers_tabs_and_panes() {
+        let state = build_domain_state(&CandidateSources {
+            backend: BackendSnapshot::Embers(EmbersSnapshot {
+                context: EmbersContext {
+                    client_id: Some("client-7".to_string()),
+                    current_session_name: Some("alpha".to_string()),
+                    current_window_index: Some(2),
+                    pane_id: Some("201".to_string()),
+                    previous_session_name: None,
+                },
+                sessions: vec![EmbersSession {
+                    native_id: "7".to_string(),
+                    name: "alpha".to_string(),
+                    attached: true,
+                    last_activity: None,
+                }],
+                windows: vec![
+                    EmbersWindow {
+                        session_name: "alpha".to_string(),
+                        index: 1,
+                        name: "editor".to_string(),
+                        active: false,
+                        activity: false,
+                        bell: false,
+                        silence: false,
+                        current_path: Some(PathBuf::from("/tmp/editor")),
+                        current_command: Some("nvim".to_string()),
+                    },
+                    EmbersWindow {
+                        session_name: "alpha".to_string(),
+                        index: 2,
+                        name: "shell".to_string(),
+                        active: true,
+                        activity: true,
+                        bell: false,
+                        silence: false,
+                        current_path: Some(PathBuf::from("/tmp/shell")),
+                        current_command: Some("bash".to_string()),
+                    },
+                ],
+                panes: vec![
+                    EmbersPane {
+                        session_name: "alpha".to_string(),
+                        window_index: 1,
+                        pane_id: "101".to_string(),
+                        title: "editor".to_string(),
+                        active: false,
+                        current_path: Some(PathBuf::from("/tmp/editor")),
+                        current_command: Some("nvim".to_string()),
+                        activity: EmbersActivityState::Idle,
+                    },
+                    EmbersPane {
+                        session_name: "alpha".to_string(),
+                        window_index: 2,
+                        pane_id: "201".to_string(),
+                        title: "shell".to_string(),
+                        active: true,
+                        current_path: Some(PathBuf::from("/tmp/shell")),
+                        current_command: Some("bash".to_string()),
+                        activity: EmbersActivityState::Activity,
+                    },
+                ],
+            }),
+            zoxide: Vec::new(),
+        });
+
+        assert_eq!(
+            state.current_session_id(Some("client-7")),
+            Some(&"alpha".to_string())
+        );
+        assert_eq!(state.sessions["alpha"].native_id.as_deref(), Some("7"));
+        assert_eq!(state.sessions["alpha"].windows.len(), 2);
+        assert_eq!(state.sessions["alpha"].windows["alpha:2"].panes.len(), 1);
+        assert!(state.sessions["alpha"].windows["alpha:2"].alerts.activity);
+        assert_eq!(
+            state.sessions["alpha"].windows["alpha:2"].current_path,
+            Some(PathBuf::from("/tmp/shell"))
+        );
     }
 }

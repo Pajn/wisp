@@ -6,6 +6,17 @@
 # Wisp merges configuration as:
 # defaults < config file < environment overrides < CLI overrides
 
+[backend]
+# Runtime backend selection:
+# - "auto" prefers Embers when an Embers socket is configured or exported
+#   through EMBERS_SOCKET, otherwise Wisp falls back to tmux.
+# - "tmux" forces tmux.
+# - "embers" forces Embers.
+# Note: Embers support ("auto" resolving to Embers, or kind = "embers") only
+# works when the binary is built with the `embers` feature. Default builds may
+# not include Embers, in which case these options have no effect (or error).
+kind = "auto"
+
 [ui]
 # Preferred UI mode: "auto", "popup", or "fullscreen".
 mode = "auto"
@@ -33,6 +44,12 @@ engine = "nucleo"
 # Case mode: "ignore", "respect", or "smart".
 case_mode = "smart"
 
+[embers]
+# These settings only take effect in builds compiled with the `embers` feature;
+# in default builds without it they are ignored.
+# Optional Embers socket path. If unset, Wisp still auto-detects EMBERS_SOCKET.
+# socket_path = "/tmp/embers.sock"
+
 [tmux]
 # Query extra window information from tmux when needed.
 query_windows = false
@@ -42,6 +59,7 @@ prefer_popup = true
 
 # Popup dimensions accept either percentages like "80%"
 # or absolute cell counts like "120".
+# Wisp also reuses these dimensions for Embers floating popup surfaces.
 popup_width = "80%"
 popup_height = "85%"
 

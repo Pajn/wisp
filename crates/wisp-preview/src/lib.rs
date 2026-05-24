@@ -209,13 +209,12 @@ where
             return Err(PreviewError::Unsupported);
         };
 
-        let captured =
-            self.tmux
-                .capture_pane(session_name)
-                .map_err(|source| PreviewError::Tmux {
-                    session_name: session_name.clone(),
-                    message: source.to_string(),
-                })?;
+        let captured = self.tmux.capture_pane(session_name).map_err(|source| {
+            PreviewError::SessionCapture {
+                session_name: session_name.clone(),
+                message: source.to_string(),
+            }
+        })?;
 
         Ok(PreviewContent::from_text_tail(
             format!("Pane {session_name}"),
@@ -237,8 +236,8 @@ pub enum PreviewError {
     },
     #[error("session `{0}` was not found")]
     MissingSession(String),
-    #[error("failed to capture active pane for session `{session_name}`: {message}")]
-    Tmux {
+    #[error("failed to capture session preview for `{session_name}`: {message}")]
+    SessionCapture {
         session_name: String,
         message: String,
     },
@@ -311,7 +310,7 @@ mod tests {
                     "alpha".to_string(),
                     SessionRecord {
                         id: "alpha".to_string(),
-                        tmux_id: None,
+                        native_id: None,
                         name: "alpha".to_string(),
                         attached: true,
                         windows: BTreeMap::from([(

@@ -127,7 +127,7 @@ pub struct DomainSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub id: SessionId,
-    pub tmux_id: Option<String>,
+    pub native_id: Option<String>,
     pub name: String,
     pub attached: bool,
     pub windows: BTreeMap<WindowId, WindowRecord>,
@@ -331,7 +331,7 @@ mod tests {
                 "alpha".to_string(),
                 SessionRecord {
                     id: "alpha".to_string(),
-                    tmux_id: None,
+                    native_id: None,
                     name: "alpha".to_string(),
                     attached: true,
                     windows: BTreeMap::from([(
