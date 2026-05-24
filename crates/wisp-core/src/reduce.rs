@@ -112,7 +112,7 @@ mod tests {
                 "alpha".to_string(),
                 SessionRecord {
                     id: "alpha".to_string(),
-                    tmux_id: None,
+                    native_id: None,
                     name: "alpha".to_string(),
                     attached: true,
                     windows: BTreeMap::from([(
@@ -171,7 +171,7 @@ mod tests {
             "beta".to_string(),
             SessionRecord {
                 id: "beta".to_string(),
-                tmux_id: None,
+                native_id: None,
                 name: "beta".to_string(),
                 attached: false,
                 windows: BTreeMap::from([(
@@ -219,7 +219,7 @@ mod tests {
             "beta".to_string(),
             SessionRecord {
                 id: "beta".to_string(),
-                tmux_id: None,
+                native_id: None,
                 name: "beta".to_string(),
                 attached: false,
                 windows: BTreeMap::from([(
@@ -273,7 +273,7 @@ mod tests {
             "beta".to_string(),
             SessionRecord {
                 id: "beta".to_string(),
-                tmux_id: None,
+                native_id: None,
                 name: "beta".to_string(),
                 attached: false,
                 windows: BTreeMap::from([(
