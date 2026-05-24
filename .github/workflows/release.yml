@@ -36,13 +36,22 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.90
+          toolchain: 1.95.0
           components: clippy, rustfmt
 
-      - name: Install tmux
+      - name: Install system dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y tmux
+          sudo apt-get update && sudo apt-get install -y tmux unzip
           tmux new-session -d
+          # The flatbuffers-generated code only compiles against a matching
+          # flatc; the apt package is too old. Install the flatc release that
+          # matches the `flatbuffers` crate version pinned in Cargo.lock.
+          flatc_version="$(sed -nE '/name = "flatbuffers"/{n;s/^version = "(.*)"$/\1/p;}' crates/wisp-embers/Cargo.lock)"
+          [ -n "$flatc_version" ] || { echo "could not determine flatbuffers version from Cargo.lock" >&2; exit 1; }
+          curl -fsSL -o /tmp/flatc.zip \
+            "https://github.com/google/flatbuffers/releases/download/v${flatc_version}/Linux.flatc.binary.g++-13.zip"
+          sudo unzip -o /tmp/flatc.zip -d /usr/local/bin
+          flatc --version
 
       - name: Cache cargo artifacts
         uses: swatinem/rust-cache@v2
@@ -95,7 +104,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.90
+          toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
       - name: Upload release archive
