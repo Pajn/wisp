@@ -1766,12 +1766,7 @@ fn spawn_git_status_workers(work_items: Vec<GitWorkItem>) -> mpsc::Receiver<GitS
         let sender = sender.clone();
         let queue = Arc::clone(&queue);
         thread::spawn(move || {
-            loop {
-                let Some(work_item) = queue.lock().ok().and_then(|mut queue| queue.pop_front())
-                else {
-                    break;
-                };
-
+            while let Some(work_item) = queue.lock().ok().and_then(|mut queue| queue.pop_front()) {
                 if let Some((sync, dirty)) = git::branch_status_for_directory(&work_item.path) {
                     let _ = sender.send(GitStatusUpdate {
                         session_id: work_item.session_id,

@@ -256,8 +256,8 @@ pub fn derive_session_list_with_worktrees(
     // Add worktrees that don't have matching sessions
     let session_paths: BTreeSet<&Path> = state
         .sessions
-        .iter()
-        .filter_map(|(_, session)| {
+        .values()
+        .filter_map(|session| {
             session
                 .windows
                 .values()
