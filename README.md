@@ -1,10 +1,10 @@
 # Wisp
 
-Wisp is a native Rust tmux navigation tool inspired by `tmux-sessionx`. It shares one session-aware core across a popup picker, sidebar surfaces, and a compact tmux status-line renderer.
+Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. It shares one session-aware core across tmux, an Embers backend, sidebar surfaces, and a compact tmux status-line renderer.
 
 ## High-level features
 
-- tmux-aware session discovery, switching, and attachment
+- tmux session discovery, switching, and attachment, with optional Embers backend support
 - sidebar pane and sidebar popup surfaces in addition to the main picker
 - git worktree-aware picker: see only sessions for the current repo, or browse all worktrees
 - zoxide-backed directory discovery
@@ -17,6 +17,7 @@ Wisp is a native Rust tmux navigation tool inspired by `tmux-sessionx`. It share
 - `wisp-core`: canonical session, alert, reducer, and projection logic
 - `wisp-config`: config defaults, loading, merge precedence, and validation
 - `wisp-tmux`: tmux snapshot/actions backend plus polling fallback
+- `wisp-embers`: optional Embers snapshot/actions adapter and subscription bridge
 - `wisp-zoxide`: zoxide provider and normalization
 - `wisp-preview`: preview generation and cache
 - `wisp-fuzzy`: matcher abstraction
@@ -29,7 +30,8 @@ Wisp is a native Rust tmux navigation tool inspired by `tmux-sessionx`. It share
 
 Requirements:
 
-- `tmux`
+- `tmux` for tmux-backed flows
+- an Embers checkout at `../embers` only when building with `--features embers`
 - `zoxide` for directory candidates
 - Rust toolchain new enough for edition 2024
 
@@ -69,6 +71,16 @@ wisp sidebar-popup
 wisp sidebar-pane
 wisp statusline install
 ```
+
+For Embers, build with the opt-in feature and select the backend with config or an environment override:
+
+```bash
+cargo install --path crates/wisp-bin --features embers
+WISP_BACKEND=embers wisp fullscreen
+WISP_BACKEND=embers WISP_EMBERS_SOCKET=/tmp/embers.sock wisp popup
+```
+
+Current Embers support covers the main picker, session actions, previews, live refresh, native floating `wisp popup`, floating `wisp sidebar-popup`, and root-split `wisp sidebar-pane`. `wisp statusline ...` remains tmux-only.
 
 Use `--worktree` (or `-w`) to start the picker in worktree mode, which shows only sessions belonging to worktrees of the current repo alongside worktrees that don't yet have sessions.
 
@@ -121,8 +133,11 @@ Config file discovery:
 
 ```bash
 cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings # requires ../embers
 cargo test --workspace --all-targets
+cargo test --workspace --all-targets --all-features # requires ../embers
+cargo test --manifest-path crates/wisp-embers/Cargo.toml --test integration # requires ../embers
 cargo test -p wisp --test smoke
 cargo bench -p wisp-core --bench projections --no-run
 cargo bench -p wisp-status --bench formatting --no-run

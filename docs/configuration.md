@@ -25,11 +25,19 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 
 ## Value formats
 
+- `backend.kind` accepts `auto`, `tmux`, or `embers`.
+- `embers.socket_path` accepts a socket path. The value is used as-is and is never validated: an absolute path is recommended by convention, but a relative path is accepted and resolved against the process working directory when the client connects.
 - `tmux.popup_width` and `tmux.popup_height` accept either percentages like `"80%"` or cell counts like `"40"`.
 - `ui.preview_width` is a float from `0.2` to `0.8`.
 - Boolean environment overrides accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, or `off`.
 
 ## Sections and keys
+
+### `[backend]`
+
+| Key | Type | Default | Valid values | Notes |
+| --- | --- | --- | --- | --- |
+| `kind` | string | `"auto"` | `auto`, `tmux`, `embers` | With the `embers` Cargo feature enabled, `auto` prefers Embers when an Embers socket is configured or exposed via `EMBERS_SOCKET`; otherwise Wisp falls back to tmux. Without that feature, `auto` always uses tmux and explicit `embers` reports that support was not compiled in. |
 
 ### `[ui]`
 
@@ -49,6 +57,12 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | `engine` | string | `"nucleo"` | `nucleo`, `skim` | Matcher backend selection. |
 | `case_mode` | string | `"smart"` | `ignore`, `respect`, `smart` | Case-sensitivity strategy for fuzzy matching. |
 
+### `[embers]`
+
+| Key | Type | Default | Valid values | Notes |
+| --- | --- | --- | --- | --- |
+| `socket_path` | string | unset | socket path | Socket path used when the Embers backend is selected. Not validated; an absolute path is recommended by convention but a relative path is used as-is (resolved against the working directory at connect time). If omitted, Wisp still auto-detects `EMBERS_SOCKET` at runtime. |
+
 ### `[tmux]`
 
 | Key | Type | Default | Valid values | Notes |
@@ -57,6 +71,8 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | `prefer_popup` | bool | `true` | `true`, `false` | Prefer popup UI when tmux supports it. |
 | `popup_width` | string | `"80%"` | percent or cells | Popup width, for example `"80%"` or `"120"`. |
 | `popup_height` | string | `"85%"` | percent or cells | Popup height, for example `"85%"` or `"40"`. |
+
+Embers runtime support is behind the `embers` Cargo feature and expects the local Embers checkout used by the adapter crate. When Wisp is built with that feature and `backend.kind = "embers"`, `wisp fullscreen`, `wisp popup`, `wisp sidebar-popup`, `wisp sidebar-pane`, and the internal `wisp ui ...` surfaces work against Embers. `wisp popup` and `wisp sidebar-popup` open native Embers floating windows, and `wisp sidebar-pane` opens a root-level split sidebar in the current session. Popup sizing still reuses `tmux.popup_width` and `tmux.popup_height`. `wisp statusline ...` remains tmux-only for now.
 
 ### `[status]`
 
@@ -130,21 +146,30 @@ These environment variables are recognized today:
 | Variable | Effect |
 | --- | --- |
 | `WISP_CONFIG` | Overrides the config file path. |
+| `WISP_BACKEND` | Overrides `backend.kind`. |
+| `WISP_EMBERS_SOCKET` | Overrides `embers.socket_path`. |
 | `WISP_MODE` or `WISP_UI_MODE` | Overrides `ui.mode`. |
 | `WISP_ENGINE` or `WISP_FUZZY_ENGINE` | Overrides `fuzzy.engine`. |
 | `WISP_LOG_LEVEL` | Overrides `logging.level`. |
 | `WISP_PREVIEW_ENABLED` | Overrides `preview.enabled`. |
 | `WISP_TMUX_PREFER_POPUP` | Overrides `tmux.prefer_popup`. |
 | `WISP_NO_ZOXIDE` | Disables zoxide by forcing `zoxide.enabled = false`. |
+| `EMBERS_SOCKET` | Lets `backend.kind = "auto"` discover Embers automatically when no Wisp-specific socket override is set. |
 
 ## Example
 
 ```toml
+[backend]
+kind = "auto"
+
 [ui]
 mode = "popup"
 preview_position = "right"
 preview_width = 0.6
 session_sort = "recent"
+
+[embers]
+# socket_path = "/tmp/embers.sock"
 
 [tmux]
 prefer_popup = true

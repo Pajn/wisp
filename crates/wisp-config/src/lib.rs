@@ -10,8 +10,10 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedConfig {
+    pub backend: BackendConfig,
     pub ui: UiConfig,
     pub fuzzy: FuzzyConfig,
+    pub embers: EmbersConfig,
     pub tmux: TmuxConfig,
     pub status: StatusConfig,
     pub zoxide: ZoxideConfig,
@@ -23,6 +25,9 @@ pub struct ResolvedConfig {
 impl Default for ResolvedConfig {
     fn default() -> Self {
         Self {
+            backend: BackendConfig {
+                kind: BackendKind::Auto,
+            },
             ui: UiConfig {
                 mode: UiMode::Auto,
                 show_help: true,
@@ -35,6 +40,7 @@ impl Default for ResolvedConfig {
                 engine: FuzzyEngine::Nucleo,
                 case_mode: CaseMode::Smart,
             },
+            embers: EmbersConfig { socket_path: None },
             tmux: TmuxConfig {
                 query_windows: false,
                 prefer_popup: true,
@@ -89,6 +95,11 @@ impl Default for ResolvedConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendConfig {
+    pub kind: BackendKind,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiConfig {
     pub mode: UiMode,
@@ -103,6 +114,11 @@ pub struct UiConfig {
 pub struct FuzzyConfig {
     pub engine: FuzzyEngine,
     pub case_mode: CaseMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbersConfig {
+    pub socket_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +219,15 @@ impl Default for LoadOptions {
 pub enum UiMode {
     Popup,
     Fullscreen,
+    #[default]
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendKind {
+    Tmux,
+    Embers,
     #[default]
     Auto,
 }
@@ -345,6 +370,11 @@ impl_from_str_for_enum!(UiMode {
     "popup" => UiMode::Popup,
     "fullscreen" => UiMode::Fullscreen,
     "auto" => UiMode::Auto,
+});
+impl_from_str_for_enum!(BackendKind {
+    "tmux" => BackendKind::Tmux,
+    "embers" => BackendKind::Embers,
+    "auto" => BackendKind::Auto,
 });
 impl_from_str_for_enum!(FuzzyEngine {
     "nucleo" => FuzzyEngine::Nucleo,
@@ -519,8 +549,10 @@ fn parse_partial_config(input: &str, strict: bool) -> Result<PartialConfig, Conf
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct PartialConfig {
+    backend: PartialBackendConfig,
     ui: PartialUiConfig,
     fuzzy: PartialFuzzyConfig,
+    embers: PartialEmbersConfig,
     tmux: PartialTmuxConfig,
     status: PartialStatusConfig,
     zoxide: PartialZoxideConfig,
@@ -531,8 +563,10 @@ struct PartialConfig {
 
 impl PartialConfig {
     fn merge(&mut self, other: Self) {
+        self.backend.merge(other.backend);
         self.ui.merge(other.ui);
         self.fuzzy.merge(other.fuzzy);
+        self.embers.merge(other.embers);
         self.tmux.merge(other.tmux);
         self.status.merge(other.status);
         self.zoxide.merge(other.zoxide);
@@ -543,6 +577,18 @@ impl PartialConfig {
 
     fn from_environment(env_overrides: &BTreeMap<String, String>) -> Result<Self, ConfigError> {
         let mut config = Self::default();
+
+        if let Some(value) = env_overrides.get("WISP_BACKEND") {
+            config.backend.kind =
+                Some(
+                    value
+                        .parse()
+                        .map_err(|message| ConfigError::InvalidEnvironment {
+                            key: "WISP_BACKEND".to_string(),
+                            message,
+                        })?,
+                );
+        }
 
         if let Some(value) = env_overrides
             .get("WISP_MODE")
@@ -586,6 +632,10 @@ impl PartialConfig {
                 );
         }
 
+        if let Some(value) = env_overrides.get("WISP_EMBERS_SOCKET") {
+            config.embers.socket_path = Some(PathBuf::from(value));
+        }
+
         if let Some(value) = env_overrides.get("WISP_PREVIEW_ENABLED") {
             config.preview.enabled = Some(parse_bool("WISP_PREVIEW_ENABLED", value)?);
         }
@@ -616,6 +666,10 @@ impl PartialConfig {
         let mut config = ResolvedConfig::default();
         let mut errors = Vec::new();
 
+        if let Some(kind) = self.backend.kind {
+            config.backend.kind = kind;
+        }
+
         if let Some(mode) = self.ui.mode {
             config.ui.mode = mode;
         }
@@ -641,6 +695,8 @@ impl PartialConfig {
         if let Some(case_mode) = self.fuzzy.case_mode {
             config.fuzzy.case_mode = case_mode;
         }
+
+        config.embers.socket_path = self.embers.socket_path;
 
         if let Some(query_windows) = self.tmux.query_windows {
             config.tmux.query_windows = query_windows;
@@ -778,6 +834,18 @@ impl PartialConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
+struct PartialBackendConfig {
+    kind: Option<BackendKind>,
+}
+
+impl PartialBackendConfig {
+    fn merge(&mut self, other: Self) {
+        merge_option(&mut self.kind, other.kind);
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 struct PartialUiConfig {
     mode: Option<UiMode>,
     show_help: Option<bool>,
@@ -809,6 +877,18 @@ impl PartialFuzzyConfig {
     fn merge(&mut self, other: Self) {
         merge_option(&mut self.engine, other.engine);
         merge_option(&mut self.case_mode, other.case_mode);
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct PartialEmbersConfig {
+    socket_path: Option<PathBuf>,
+}
+
+impl PartialEmbersConfig {
+    fn merge(&mut self, other: Self) {
+        merge_option(&mut self.socket_path, other.socket_path);
     }
 }
 
@@ -1026,11 +1106,11 @@ fn validate_config(config: &ResolvedConfig, errors: &mut Vec<ValidationError>) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, path::PathBuf};
 
     use super::{
-        CliOverrides, ConfigError, FuzzyEngine, KeyAction, LogLevel, SessionSortMode, UiMode,
-        resolve_config,
+        BackendKind, CliOverrides, ConfigError, FuzzyEngine, KeyAction, LogLevel, SessionSortMode,
+        UiMode, resolve_config,
     };
 
     #[test]
@@ -1038,6 +1118,7 @@ mod tests {
         let config = resolve_config(None, &BTreeMap::new(), &CliOverrides::default(), false)
             .expect("default config should resolve");
 
+        assert_eq!(config.backend.kind, BackendKind::Auto);
         assert_eq!(config.ui.mode, UiMode::Auto);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Nucleo);
         assert!(config.zoxide.enabled);
@@ -1063,6 +1144,9 @@ mod tests {
     #[test]
     fn parses_toml_config_values() {
         let input = r#"
+            [backend]
+            kind = "embers"
+
             [ui]
             mode = "popup"
             preview_width = 0.6
@@ -1070,6 +1154,9 @@ mod tests {
 
             [fuzzy]
             engine = "skim"
+
+            [embers]
+            socket_path = "/tmp/embers.sock"
 
             [tmux]
             popup_width = "90%"
@@ -1102,10 +1189,15 @@ mod tests {
         )
         .expect("toml config should resolve");
 
+        assert_eq!(config.backend.kind, BackendKind::Embers);
         assert_eq!(config.ui.mode, UiMode::Popup);
         assert_eq!(config.ui.preview_width, 0.6);
         assert_eq!(config.ui.session_sort, SessionSortMode::Alphabetical);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Skim);
+        assert_eq!(
+            config.embers.socket_path,
+            Some(PathBuf::from("/tmp/embers.sock"))
+        );
         assert_eq!(config.status.line, 3);
         assert_eq!(config.status.icon, "Wisp");
         assert_eq!(config.status.max_sessions, Some(5));
@@ -1138,8 +1230,13 @@ mod tests {
             level = "info"
         "#;
         let env = BTreeMap::from([
+            ("WISP_BACKEND".to_string(), "embers".to_string()),
             ("WISP_MODE".to_string(), "popup".to_string()),
             ("WISP_ENGINE".to_string(), "nucleo".to_string()),
+            (
+                "WISP_EMBERS_SOCKET".to_string(),
+                "/tmp/env-embers.sock".to_string(),
+            ),
             ("WISP_LOG_LEVEL".to_string(), "debug".to_string()),
         ]);
         let cli = CliOverrides {
@@ -1153,8 +1250,13 @@ mod tests {
         let config =
             resolve_config(Some(input), &env, &cli, false).expect("merged config should resolve");
 
+        assert_eq!(config.backend.kind, BackendKind::Embers);
         assert_eq!(config.ui.mode, UiMode::Auto);
         assert_eq!(config.fuzzy.engine, FuzzyEngine::Skim);
+        assert_eq!(
+            config.embers.socket_path,
+            Some(PathBuf::from("/tmp/env-embers.sock"))
+        );
         assert_eq!(config.logging.level, LogLevel::Trace);
         assert!(!config.zoxide.enabled);
     }

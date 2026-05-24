@@ -11,11 +11,12 @@ members = [
     "crates/wisp-zoxide",
 ]
 resolver = "3"
+exclude = ["crates/wisp-embers"]
 
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95.0"
 license = "MIT"
 repository = "https://github.com/Pajn/wisp"
 
@@ -41,6 +42,7 @@ toml = "0.8"
 wisp-app = { version = "0.2.0", path = "crates/wisp-app" }
 wisp-config = { version = "0.2.0", path = "crates/wisp-config" }
 wisp-core = { version = "0.2.0", path = "crates/wisp-core" }
+wisp-embers = { version = "0.1.0", path = "crates/wisp-embers" }
 wisp-fuzzy = { version = "0.2.0", path = "crates/wisp-fuzzy" }
 wisp-preview = { version = "0.2.0", path = "crates/wisp-preview" }
 wisp-status = { version = "0.2.0", path = "crates/wisp-status" }
