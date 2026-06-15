@@ -33,7 +33,7 @@ Usage:
   scripts/release.sh publish [--dry-run] [tag]
 
 Commands:
-  prepare     Bump the workspace version, refresh Cargo.lock, and run release validation.
+  prepare     Bump workspace and internal dependency versions, refresh Cargo.lock, and run release validation.
   verify-tag  Fail unless the provided tag (or the current exact tag) matches Cargo.toml.
   publish     Verify the tag, run release validation, preflight package all crates, and publish in dependency order.
 EOF
@@ -73,7 +73,7 @@ require_clean_tree() {
   [[ -z "${status}" ]] || die "git tree must be clean before preparing a release"
 }
 
-bump_workspace_version() {
+bump_workspace_versions() {
   local version="$1"
 
   python3 - "${CARGO_TOML}" "${version}" <<'PY'
@@ -92,6 +92,15 @@ updated, count = re.subn(
 )
 if count != 1:
     raise SystemExit("failed to update workspace.package.version")
+
+updated, count = re.subn(
+    r'(?m)^((?:wisp(?:-[a-z]+)?) = \{ version = ")([^"]+)(", path = "crates/[^"]+" \})$',
+    rf'\g<1>{version}\3',
+    updated,
+)
+if count == 0:
+    raise SystemExit("failed to update internal workspace dependency versions")
+
 path.write_text(updated)
 PY
 }
@@ -190,7 +199,7 @@ cmd_prepare() {
   existing_version="$(current_version)"
   [[ "${version}" != "${existing_version}" ]] || die "version ${version} is already current"
 
-  bump_workspace_version "${version}"
+  bump_workspace_versions "${version}"
   refresh_lockfile
   run_validation
 }
