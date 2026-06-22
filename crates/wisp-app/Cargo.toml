@@ -10,8 +10,13 @@ description = "application state assembly for Wisp"
 [dependencies]
 wisp-config.workspace = true
 wisp-core.workspace = true
+wisp-embers = { workspace = true, optional = true }
 wisp-tmux.workspace = true
 wisp-zoxide.workspace = true
+
+[features]
+default = []
+embers = ["dep:wisp-embers"]
 
 [lints]
 workspace = true

@@ -20,9 +20,11 @@ use crossterm::{
 };
 use ratatui::widgets::Clear;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use wisp_app::{CandidateSources, build_domain_state};
+use wisp_app::{BackendSnapshot, CandidateSources, build_domain_state};
+#[cfg(feature = "embers")]
+use wisp_config::Dimension;
 use wisp_config::{
-    CliOverrides, KeyAction, LoadOptions, ResolvedConfig, SessionSortMode, load_config,
+    BackendKind, CliOverrides, KeyAction, LoadOptions, ResolvedConfig, SessionSortMode, load_config,
 };
 use wisp_core::{
     DomainState, GitBranchStatus, GitBranchSync, PickerMode, PreviewContent, PreviewKey,
@@ -30,6 +32,8 @@ use wisp_core::{
     derive_session_list_with_worktrees, derive_status_items, sanitize_session_name,
     sort_session_list_items,
 };
+#[cfg(feature = "embers")]
+use wisp_embers::{EmbersClient, EmbersJoinPlacement};
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
 use wisp_preview::{
     ActivePanePreviewProvider, FilesystemPreviewProvider, PreviewProvider,
@@ -49,6 +53,10 @@ const PREVIEW_REFRESH_DEBOUNCE: Duration = Duration::from_millis(400);
 const DEFAULT_CLIENT_ID: &str = "default";
 const SIDEBAR_PANE_TITLE: &str = "Wisp Sidebar";
 const SIDEBAR_PANE_WIDTH: u16 = 36;
+#[cfg(feature = "embers")]
+const EMBERS_SURFACE_ENV: &str = "WISP_EMBERS_SURFACE";
+#[cfg(feature = "embers")]
+const EMBERS_SIDEBAR_PANE_SURFACE: &str = "sidebar-pane";
 const STATUSLINE_REFRESH_HOOKS: &[&str] = &[
     "client-session-changed[200]",
     "session-created[200]",
@@ -58,7 +66,7 @@ const STATUSLINE_REFRESH_HOOKS: &[&str] = &[
 const STATUSLINE_REFRESH_COMMAND: &str = "refresh-client -S";
 
 struct CombinedPreviewProvider<'a> {
-    pane: &'a ActivePanePreviewProvider<CommandTmuxClient>,
+    session: &'a dyn PreviewProvider,
     filesystem: &'a FilesystemPreviewProvider,
 }
 
@@ -81,7 +89,100 @@ impl PreviewProvider for CombinedPreviewProvider<'_> {
             PreviewRequest::Directory { .. }
             | PreviewRequest::File { .. }
             | PreviewRequest::Metadata { .. } => self.filesystem.generate(request),
-            PreviewRequest::SessionSummary { .. } => self.pane.generate(request),
+            PreviewRequest::SessionSummary { .. } => self.session.generate(request),
+        }
+    }
+}
+
+struct TerminalTeardown {
+    active: bool,
+}
+
+impl TerminalTeardown {
+    fn active() -> Self {
+        Self { active: true }
+    }
+
+    fn restore(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<(), Box<dyn Error>> {
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalTeardown {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = disable_raw_mode();
+            let _ = execute!(stdout(), LeaveAlternateScreen);
+            let _ = execute!(stdout(), crossterm::cursor::Show);
+        }
+    }
+}
+
+#[derive(Clone)]
+enum RuntimeBackend {
+    Tmux,
+    #[cfg(feature = "embers")]
+    Embers(Arc<EmbersClient>),
+}
+
+#[cfg(feature = "embers")]
+struct EmbersPanePreviewProvider {
+    embers: Arc<EmbersClient>,
+    max_lines: usize,
+}
+
+#[cfg(feature = "embers")]
+impl EmbersPanePreviewProvider {
+    fn new(embers: Arc<EmbersClient>) -> Self {
+        Self {
+            embers,
+            max_lines: 40,
+        }
+    }
+}
+
+#[cfg(feature = "embers")]
+impl PreviewProvider for EmbersPanePreviewProvider {
+    fn can_preview(&self, request: &PreviewRequest) -> bool {
+        matches!(request, PreviewRequest::SessionSummary { .. })
+    }
+
+    fn generate(
+        &self,
+        request: &PreviewRequest,
+    ) -> Result<PreviewContent, wisp_preview::PreviewError> {
+        let PreviewRequest::SessionSummary { session_name, .. } = request else {
+            return Err(wisp_preview::PreviewError::Unsupported);
+        };
+        let captured = self
+            .embers
+            .capture_session_preview(session_name, self.max_lines)
+            .map_err(|error| wisp_preview::PreviewError::SessionCapture {
+                session_name: session_name.clone(),
+                message: error.to_string(),
+            })?;
+        Ok(PreviewContent::from_text_tail(
+            format!("Pane {session_name}"),
+            captured,
+            self.max_lines,
+        ))
+    }
+}
+
+#[cfg(feature = "embers")]
+impl RuntimeBackend {
+    fn poll_updates(&self) -> Result<bool, Box<dyn Error>> {
+        match self {
+            Self::Tmux => Ok(false),
+            #[cfg(feature = "embers")]
+            Self::Embers(client) => client.poll_updates().map_err(|error| error.into()),
         }
     }
 }
@@ -270,8 +371,43 @@ struct SidebarUiState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SidebarRuntime {
     session_name: String,
-    home_window_index: u32,
-    pane_id: Option<String>,
+    target: SidebarTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarTarget {
+    Tmux {
+        home_window_index: u32,
+        pane_id: Option<String>,
+    },
+    #[cfg(feature = "embers")]
+    Embers { buffer_id: String },
+}
+
+impl SidebarRuntime {
+    fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
+    fn tmux_pane_id(&self) -> Option<&str> {
+        match &self.target {
+            SidebarTarget::Tmux { pane_id, .. } => pane_id.as_deref(),
+            #[cfg(feature = "embers")]
+            SidebarTarget::Embers { .. } => None,
+        }
+    }
+
+    #[cfg(feature = "embers")]
+    fn embers_buffer_id(&self) -> Option<&str> {
+        match &self.target {
+            SidebarTarget::Tmux { .. } => None,
+            SidebarTarget::Embers { buffer_id } => Some(buffer_id.as_str()),
+        }
+    }
+
+    fn rename_session(&mut self, new_name: String) {
+        self.session_name = new_name;
+    }
 }
 
 fn main() -> ExitCode {
@@ -374,13 +510,11 @@ fn execute_cli(cli: ParsedCli) -> Result<(), Box<dyn Error>> {
     match cli {
         ParsedCli::Ui(mode) => {
             let config = load_runtime_config()?;
-            run_surface(mode.surface_kind(), &config, mode.picker_mode())
+            let backend = load_runtime_backend(&config)?;
+            run_surface(mode.surface_kind(), &config, mode.picker_mode(), &backend)
         }
         ParsedCli::Public(cli) => match cli.command {
-            Command::Doctor(_) => {
-                doctor();
-                Ok(())
-            }
+            Command::Doctor(_) => doctor(),
             Command::PrintConfig(_) => {
                 let config = load_runtime_config()?;
                 println!("{config:#?}");
@@ -388,31 +522,42 @@ fn execute_cli(cli: ParsedCli) -> Result<(), Box<dyn Error>> {
             }
             Command::Fullscreen(fullscreen_cmd) => {
                 let config = load_runtime_config()?;
+                let backend = load_runtime_backend(&config)?;
                 let mode = if fullscreen_cmd.worktree {
                     PickerMode::Worktree
                 } else {
                     PickerMode::AllSessions
                 };
-                run_surface(SurfaceKind::Picker, &config, mode)
+                run_surface(SurfaceKind::Picker, &config, mode, &backend)
             }
             Command::Popup(popup_cmd) => {
                 let config = load_runtime_config()?;
+                let backend = load_runtime_backend(&config)?;
                 let mode = if popup_cmd.worktree {
                     PickerMode::Worktree
                 } else {
                     PickerMode::AllSessions
                 };
-                open_popup_or_run_inline(SurfaceKind::Picker, &config, mode)
+                open_popup_or_run_inline(SurfaceKind::Picker, &config, mode, &backend)
             }
             Command::SidebarPopup(_) => {
                 let config = load_runtime_config()?;
-                open_sidebar_popup_or_run_inline(&config)
+                let backend = load_runtime_backend(&config)?;
+                open_sidebar_popup_or_run_inline(&config, &backend)
             }
-            Command::SidebarPane(_) => open_sidebar_pane(),
+            Command::SidebarPane(_) => {
+                let config = load_runtime_config()?;
+                let backend = load_runtime_backend(&config)?;
+                open_sidebar_pane(&backend)
+            }
             Command::Statusline(statusline) => {
                 validate_statusline_flags(&statusline)?;
                 let config = load_runtime_config()?;
-                run_statusline_group(&config, statusline)
+                if selected_backend_kind(&config) == BackendKind::Embers {
+                    return Err(embers_unsupported("wisp statusline"));
+                }
+                let backend = load_runtime_backend(&config)?;
+                run_statusline_group(&config, statusline, &backend)
             }
         },
     }
@@ -426,24 +571,103 @@ fn load_runtime_config() -> Result<ResolvedConfig, Box<dyn Error>> {
     .map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
-fn doctor() {
+fn selected_backend_kind(config: &ResolvedConfig) -> BackendKind {
+    match config.backend.kind {
+        BackendKind::Auto => {
+            #[cfg(feature = "embers")]
+            if resolve_embers_socket_path(config).is_some() {
+                return BackendKind::Embers;
+            }
+            BackendKind::Tmux
+        }
+        kind => kind,
+    }
+}
+
+#[cfg(feature = "embers")]
+fn resolve_embers_socket_path(config: &ResolvedConfig) -> Option<PathBuf> {
+    config
+        .embers
+        .socket_path
+        .clone()
+        .or_else(|| env::var_os("EMBERS_SOCKET").map(PathBuf::from))
+}
+
+fn load_runtime_backend(config: &ResolvedConfig) -> Result<RuntimeBackend, Box<dyn Error>> {
+    match config.backend.kind {
+        BackendKind::Tmux => Ok(RuntimeBackend::Tmux),
+        #[cfg(feature = "embers")]
+        BackendKind::Embers => {
+            let socket_path = resolve_embers_socket_path(config).ok_or_else(|| {
+                "embers backend selected, but no socket path was configured".to_string()
+            })?;
+            Ok(RuntimeBackend::Embers(Arc::new(EmbersClient::connect(
+                socket_path,
+            )?)))
+        }
+        #[cfg(not(feature = "embers"))]
+        BackendKind::Embers => Err(embers_feature_disabled()),
+        #[cfg(feature = "embers")]
+        BackendKind::Auto => match resolve_embers_socket_path(config) {
+            Some(socket_path) => Ok(RuntimeBackend::Embers(Arc::new(EmbersClient::connect(
+                socket_path,
+            )?))),
+            None => Ok(RuntimeBackend::Tmux),
+        },
+        #[cfg(not(feature = "embers"))]
+        BackendKind::Auto => Ok(RuntimeBackend::Tmux),
+    }
+}
+
+#[cfg(not(feature = "embers"))]
+fn embers_feature_disabled() -> Box<dyn Error> {
+    "embers backend support was not compiled in; rebuild with `--features embers`".into()
+}
+
+fn embers_unsupported(feature: &str) -> Box<dyn Error> {
+    format!("{feature} is not supported on the embers backend yet").into()
+}
+
+fn doctor() -> Result<(), Box<dyn Error>> {
+    let config = load_runtime_config()?;
+    let backend_kind = selected_backend_kind(&config);
     let tmux = CommandTmuxClient::new();
     let zoxide = CommandZoxideProvider::new();
 
     println!("wisp doctor");
     println!();
-    match tmux.capabilities() {
-        Ok(capabilities) => {
-            println!(
-                "tmux: {}.{} (popup: {}, status clicks: {}, mouse: {})",
-                capabilities.version.major,
-                capabilities.version.minor,
-                capabilities.supports_popup,
-                capabilities.supports_status_mouse_ranges,
-                capabilities.mouse_enabled
-            );
+    println!(
+        "backend: {}",
+        match backend_kind {
+            BackendKind::Tmux => "tmux",
+            BackendKind::Embers => "embers",
+            BackendKind::Auto => unreachable!("auto backend should resolve before doctor output"),
         }
-        Err(error) => println!("tmux: unavailable ({error})"),
+    );
+    match backend_kind {
+        BackendKind::Tmux => match tmux.capabilities() {
+            Ok(capabilities) => {
+                println!(
+                    "tmux: {}.{} (popup: {}, status clicks: {}, mouse: {})",
+                    capabilities.version.major,
+                    capabilities.version.minor,
+                    capabilities.supports_popup,
+                    capabilities.supports_status_mouse_ranges,
+                    capabilities.mouse_enabled
+                );
+            }
+            Err(error) => println!("tmux: unavailable ({error})"),
+        },
+        BackendKind::Embers => {
+            #[cfg(feature = "embers")]
+            match resolve_embers_socket_path(&config) {
+                Some(socket_path) => println!("embers: available ({})", socket_path.display()),
+                None => println!("embers: socket not configured"),
+            }
+            #[cfg(not(feature = "embers"))]
+            println!("embers: support not compiled in");
+        }
+        BackendKind::Auto => unreachable!("auto backend should resolve before doctor output"),
     }
 
     match zoxide.load_entries(5) {
@@ -451,8 +675,18 @@ fn doctor() {
         Err(error) => println!("zoxide: unavailable ({error})"),
     }
 
-    let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
-    println!("event strategy: {:?}", backend.event_strategy());
+    println!(
+        "event strategy: {}",
+        match backend_kind {
+            BackendKind::Tmux => "PollingFallback",
+            #[cfg(feature = "embers")]
+            BackendKind::Embers => "SubscriptionStream",
+            #[cfg(not(feature = "embers"))]
+            BackendKind::Embers => "Disabled",
+            BackendKind::Auto => unreachable!("auto backend should resolve before doctor output"),
+        }
+    );
+    Ok(())
 }
 
 fn validate_statusline_flags(statusline: &StatuslineGroupCommand) -> Result<(), Box<dyn Error>> {
@@ -482,7 +716,11 @@ fn validate_statusline_flags(statusline: &StatuslineGroupCommand) -> Result<(), 
 fn run_statusline_group(
     config: &ResolvedConfig,
     command: StatuslineGroupCommand,
+    backend: &RuntimeBackend,
 ) -> Result<(), Box<dyn Error>> {
+    if !matches!(backend, RuntimeBackend::Tmux) {
+        return Err(embers_unsupported("wisp statusline"));
+    }
     match command.command {
         StatuslineSubcommand::Install(args) => install_statusline(config, args.line),
         StatuslineSubcommand::Render(args) => {
@@ -503,8 +741,8 @@ fn render_statusline(
     config: &ResolvedConfig,
     force: Option<StatusRenderMode>,
 ) -> Result<(), Box<dyn Error>> {
-    let state = load_domain_state()?;
-    let items = derive_status_items(&state, Some("default"));
+    let loaded = load_domain_state(&RuntimeBackend::Tmux)?;
+    let items = derive_status_items(&loaded.state, Some(loaded.client_id.as_str()));
     let tmux = CommandTmuxClient::new();
     let capabilities = tmux.capabilities()?;
     let rendered = render_status_line(
@@ -625,8 +863,60 @@ fn selected_index_for_session(
         .position(|item| item.session_id == session_id)
 }
 
+/// Backend-agnostic session operations the picker's activation logic needs,
+/// letting the tmux and embers backends share a single implementation.
+///
+/// Implemented for `&T: TmuxClient` and for `Arc<EmbersClient>`; those are
+/// disjoint type shapes (a reference vs. a nominal type), so the two impls do
+/// not overlap and existing tmux call sites keep passing `&tmux` unchanged.
+trait SessionLauncher {
+    fn create_or_switch(&self, name: &str, directory: &Path) -> Result<(), Box<dyn Error>>;
+    fn existing_session_names(&self) -> Result<Vec<String>, Box<dyn Error>>;
+    fn switch_to(&self, session_id: &str) -> Result<(), Box<dyn Error>>;
+}
+
+impl<T: TmuxClient> SessionLauncher for &T {
+    fn create_or_switch(&self, name: &str, directory: &Path) -> Result<(), Box<dyn Error>> {
+        self.create_or_switch_session(name, directory)?;
+        Ok(())
+    }
+
+    fn existing_session_names(&self) -> Result<Vec<String>, Box<dyn Error>> {
+        // `list_sessions` already maps the "no server / no sessions" case to an
+        // empty list, so propagating here only surfaces genuine tmux errors
+        // (matching the embers implementation) rather than hiding them.
+        Ok(self
+            .list_sessions()?
+            .into_iter()
+            .map(|session| session.name)
+            .collect())
+    }
+
+    fn switch_to(&self, session_id: &str) -> Result<(), Box<dyn Error>> {
+        self.switch_or_attach_session(session_id)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "embers")]
+impl SessionLauncher for Arc<EmbersClient> {
+    fn create_or_switch(&self, name: &str, directory: &Path) -> Result<(), Box<dyn Error>> {
+        self.create_or_switch_session(name, directory)?;
+        Ok(())
+    }
+
+    fn existing_session_names(&self) -> Result<Vec<String>, Box<dyn Error>> {
+        Ok(self.list_session_names()?)
+    }
+
+    fn switch_to(&self, session_id: &str) -> Result<(), Box<dyn Error>> {
+        self.switch_session(session_id)?;
+        Ok(())
+    }
+}
+
 fn create_session_from_query(
-    tmux: &impl TmuxClient,
+    launcher: impl SessionLauncher,
     zoxide: &impl ZoxideProvider,
     query: &str,
     fallback_directory: &Path,
@@ -640,18 +930,18 @@ fn create_session_from_query(
         .query_directory(session_name)?
         .map(|entry| entry.path)
         .unwrap_or_else(|| fallback_directory.to_path_buf());
-    tmux.create_or_switch_session(session_name, &directory)?;
+    launcher.create_or_switch(session_name, &directory)?;
     Ok(true)
 }
 
 fn create_session_with_basename(
-    tmux: &impl TmuxClient,
+    launcher: impl SessionLauncher,
     basename: &str,
     path: &Path,
 ) -> Result<bool, Box<dyn Error>> {
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let existing_sessions = tmux.list_sessions().unwrap_or_default();
-    let session_name = if existing_sessions.iter().any(|s| s.name == basename) {
+    let existing_sessions = launcher.existing_session_names()?;
+    let session_name = if existing_sessions.iter().any(|name| name == basename) {
         format!(
             "{}-{:08x}",
             sanitize_session_name(&canonical_path),
@@ -660,7 +950,7 @@ fn create_session_with_basename(
     } else {
         basename.to_string()
     };
-    tmux.create_or_switch_session(&session_name, &canonical_path)?;
+    launcher.create_or_switch(&session_name, &canonical_path)?;
     Ok(true)
 }
 
@@ -710,7 +1000,7 @@ fn rebuild_session_items_for_picker_mode(
 }
 
 fn activate_filter_selection(
-    tmux: &impl TmuxClient,
+    launcher: impl SessionLauncher,
     zoxide: &impl ZoxideProvider,
     filtered: &[SessionListItem],
     selected: usize,
@@ -719,7 +1009,7 @@ fn activate_filter_selection(
     force_create_from_query: bool,
 ) -> Result<bool, Box<dyn Error>> {
     if force_create_from_query || filtered.get(selected).is_none() {
-        return create_session_from_query(tmux, zoxide, query, fallback_directory);
+        return create_session_from_query(launcher, zoxide, query, fallback_directory);
     }
 
     if let Some(item) = filtered.get(selected) {
@@ -731,7 +1021,7 @@ fn activate_filter_selection(
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("worktree");
-                    return create_session_with_basename(tmux, basename, worktree_path);
+                    return create_session_with_basename(launcher, basename, worktree_path);
                 }
                 return Ok(false);
             }
@@ -742,7 +1032,7 @@ fn activate_filter_selection(
                         .and_then(|n| n.to_str())
                         .unwrap_or("zoxide");
                     if !folder_name.is_empty() {
-                        return create_session_with_basename(tmux, folder_name, path);
+                        return create_session_with_basename(launcher, folder_name, path);
                     }
                 }
                 return Ok(false);
@@ -750,83 +1040,278 @@ fn activate_filter_selection(
             _ => {}
         }
 
-        tmux.switch_or_attach_session(&item.session_id)?;
+        launcher.switch_to(&item.session_id)?;
         return Ok(true);
     }
 
     Ok(false)
 }
 
-fn open_popup_or_run_inline(
-    kind: SurfaceKind,
-    config: &ResolvedConfig,
-    mode: PickerMode,
-) -> Result<(), Box<dyn Error>> {
-    let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
-    let command = PopupCommand {
-        program: env::current_exe()?,
-        args: vec![
+#[cfg(feature = "embers")]
+fn surface_command_args(kind: SurfaceKind, mode: PickerMode) -> Vec<String> {
+    match kind {
+        SurfaceKind::Picker => vec![
             "ui".to_string(),
             match mode {
                 PickerMode::AllSessions => "picker".to_string(),
                 PickerMode::Worktree => "picker-worktree".to_string(),
             },
         ],
-    };
-    match backend.open_popup(&PopupSpec {
-        command,
-        options: PopupOptions::default(),
-    }) {
-        Ok(()) => Ok(()),
-        Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
-            run_surface(kind, config, mode)
-        }
-        Err(error) => Err(Box::new(error)),
+        SurfaceKind::SidebarCompact => vec!["ui".to_string(), "sidebar-compact".to_string()],
+        SurfaceKind::SidebarExpanded => vec!["ui".to_string(), "sidebar-expanded".to_string()],
     }
 }
 
-fn open_sidebar_popup_or_run_inline(config: &ResolvedConfig) -> Result<(), Box<dyn Error>> {
-    let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
-    let command = PopupCommand {
-        program: env::current_exe()?,
-        args: vec!["ui".to_string(), "sidebar-compact".to_string()],
-    };
-    match backend.open_popup(&PopupSpec {
-        command,
-        options: PopupOptions {
-            width: wisp_tmux::PopupDimension::Percent(35),
-            height: wisp_tmux::PopupDimension::Percent(85),
-            title: Some("Wisp Sidebar".to_string()),
-        },
-    }) {
-        Ok(()) => Ok(()),
-        Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
-            run_surface(SurfaceKind::SidebarCompact, config, PickerMode::AllSessions)
-        }
-        Err(error) => Err(Box::new(error)),
+#[cfg(feature = "embers")]
+fn surface_title(kind: SurfaceKind) -> &'static str {
+    match kind {
+        SurfaceKind::Picker => "Wisp Picker",
+        SurfaceKind::SidebarCompact | SurfaceKind::SidebarExpanded => SIDEBAR_PANE_TITLE,
     }
 }
 
-fn open_sidebar_pane() -> Result<(), Box<dyn Error>> {
-    let tmux = CommandTmuxClient::new();
-    reconcile_sidebar_for_current_context(
-        &tmux,
-        &sidebar_surface_command(env::current_exe()?),
-        None,
-    )?;
-    Ok(())
+#[cfg(feature = "embers")]
+fn embers_sidebar_env(persistent: bool) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    if persistent {
+        env.insert(
+            EMBERS_SURFACE_ENV.to_string(),
+            EMBERS_SIDEBAR_PANE_SURFACE.to_string(),
+        );
+    }
+    env
+}
+
+#[cfg(feature = "embers")]
+fn resolve_dimension_to_cells(dimension: &Dimension, max: u16) -> u16 {
+    match dimension {
+        Dimension::Percent(percent) => {
+            ((u32::from(max) * u32::from(*percent)) / 100).clamp(1, u32::from(max.max(1))) as u16
+        }
+        Dimension::Cells(cells) => (*cells).clamp(1, max.max(1)),
+    }
+}
+
+#[cfg(feature = "embers")]
+fn create_embers_floating_for_buffer(
+    client: &EmbersClient,
+    buffer_id: &str,
+    title: Option<&str>,
+    width: u16,
+    height: u16,
+    focus: bool,
+    close_on_empty: bool,
+) -> Result<(), Box<dyn Error>> {
+    match client.create_floating_for_buffer_in_current_session(
+        buffer_id,
+        title,
+        width,
+        height,
+        focus,
+        close_on_empty,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = client.kill_buffer(buffer_id);
+            Err(Box::new(error))
+        }
+    }
+}
+
+#[cfg(feature = "embers")]
+fn join_embers_buffer_to_current_session_root(
+    client: &EmbersClient,
+    buffer_id: &str,
+    placement: EmbersJoinPlacement,
+    leading_size: Option<u16>,
+    focus: bool,
+) -> Result<String, Box<dyn Error>> {
+    match client.join_buffer_to_current_session_root(buffer_id, placement, leading_size, focus) {
+        Ok(session_name) => Ok(session_name),
+        Err(error) => {
+            let _ = client.kill_buffer(buffer_id);
+            Err(Box::new(error))
+        }
+    }
+}
+
+fn open_popup_or_run_inline(
+    kind: SurfaceKind,
+    config: &ResolvedConfig,
+    mode: PickerMode,
+    backend: &RuntimeBackend,
+) -> Result<(), Box<dyn Error>> {
+    match backend {
+        RuntimeBackend::Tmux => {
+            let tmux_backend = PollingTmuxBackend::new(CommandTmuxClient::new());
+            let command = PopupCommand {
+                program: env::current_exe()?,
+                args: vec![
+                    "ui".to_string(),
+                    match mode {
+                        PickerMode::AllSessions => "picker".to_string(),
+                        PickerMode::Worktree => "picker-worktree".to_string(),
+                    },
+                ],
+            };
+            match tmux_backend.open_popup(&PopupSpec {
+                command,
+                options: PopupOptions::default(),
+            }) {
+                Ok(()) => Ok(()),
+                Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
+                    run_surface(kind, config, mode, backend)
+                }
+                Err(error) => Err(Box::new(error)),
+            }
+        }
+        #[cfg(feature = "embers")]
+        RuntimeBackend::Embers(client) => {
+            let (viewport_cols, viewport_rows) = client
+                .current_session_viewport_size()?
+                .ok_or_else(|| "embers popup requires an active embers session".to_string())?;
+            let command = surface_command_args(kind, mode);
+            let cwd = env::current_dir()?;
+            let width = resolve_dimension_to_cells(&config.tmux.popup_width, viewport_cols);
+            let height = resolve_dimension_to_cells(&config.tmux.popup_height, viewport_rows);
+            let buffer_id = client.create_buffer(
+                &command,
+                surface_title(kind),
+                Some(&cwd),
+                &BTreeMap::new(),
+            )?;
+            create_embers_floating_for_buffer(
+                client,
+                &buffer_id,
+                Some(surface_title(kind)),
+                width,
+                height,
+                true,
+                true,
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn open_sidebar_popup_or_run_inline(
+    config: &ResolvedConfig,
+    backend: &RuntimeBackend,
+) -> Result<(), Box<dyn Error>> {
+    match backend {
+        RuntimeBackend::Tmux => {
+            let tmux_backend = PollingTmuxBackend::new(CommandTmuxClient::new());
+            let command = PopupCommand {
+                program: env::current_exe()?,
+                args: vec!["ui".to_string(), "sidebar-compact".to_string()],
+            };
+            match tmux_backend.open_popup(&PopupSpec {
+                command,
+                options: PopupOptions {
+                    width: wisp_tmux::PopupDimension::Percent(35),
+                    height: wisp_tmux::PopupDimension::Percent(85),
+                    title: Some("Wisp Sidebar".to_string()),
+                },
+            }) {
+                Ok(()) => Ok(()),
+                Err(TmuxError::PopupUnavailable { .. }) | Err(TmuxError::CommandFailed { .. }) => {
+                    run_surface(
+                        SurfaceKind::SidebarCompact,
+                        config,
+                        PickerMode::AllSessions,
+                        backend,
+                    )
+                }
+                Err(error) => Err(Box::new(error)),
+            }
+        }
+        #[cfg(feature = "embers")]
+        RuntimeBackend::Embers(client) => {
+            let (viewport_cols, viewport_rows) =
+                client.current_session_viewport_size()?.ok_or_else(|| {
+                    "embers sidebar-popup requires an active embers session".to_string()
+                })?;
+            let command =
+                surface_command_args(SurfaceKind::SidebarCompact, PickerMode::AllSessions);
+            let cwd = env::current_dir()?;
+            let buffer_id = client.create_buffer(
+                &command,
+                surface_title(SurfaceKind::SidebarCompact),
+                Some(&cwd),
+                &BTreeMap::new(),
+            )?;
+            create_embers_floating_for_buffer(
+                client,
+                &buffer_id,
+                Some(surface_title(SurfaceKind::SidebarCompact)),
+                resolve_dimension_to_cells(&Dimension::Percent(35), viewport_cols),
+                resolve_dimension_to_cells(&Dimension::Percent(85), viewport_rows),
+                true,
+                true,
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn open_sidebar_pane(backend: &RuntimeBackend) -> Result<(), Box<dyn Error>> {
+    match backend {
+        RuntimeBackend::Tmux => {
+            let tmux = CommandTmuxClient::new();
+            reconcile_sidebar_for_current_context(
+                &tmux,
+                &sidebar_surface_command(env::current_exe()?),
+                None,
+            )?;
+            Ok(())
+        }
+        #[cfg(feature = "embers")]
+        RuntimeBackend::Embers(client) => {
+            let command =
+                surface_command_args(SurfaceKind::SidebarCompact, PickerMode::AllSessions);
+            let cwd = env::current_dir()?;
+            let buffer_id = client.create_buffer(
+                &command,
+                SIDEBAR_PANE_TITLE,
+                Some(&cwd),
+                &embers_sidebar_env(true),
+            )?;
+            join_embers_buffer_to_current_session_root(
+                client,
+                &buffer_id,
+                EmbersJoinPlacement::Left,
+                Some(SIDEBAR_PANE_WIDTH),
+                true,
+            )?;
+            Ok(())
+        }
+    }
 }
 
 fn run_surface(
     kind: SurfaceKind,
     config: &ResolvedConfig,
     mode: PickerMode,
+    backend: &RuntimeBackend,
 ) -> Result<(), Box<dyn Error>> {
-    let state = load_domain_state()?;
+    let zoxide_entries = load_zoxide_entries();
+    let loaded_state = load_domain_state_with_zoxide(backend, zoxide_entries.clone())?;
+    let mut active_client_id = loaded_state.client_id;
+    let state = loaded_state.state;
     let mut session_sort = config.ui.session_sort;
     let (mut session_items, mut pending_branch_names, mut branch_status_updates) =
-        rebuild_session_items_for_picker_mode(&state, Some(DEFAULT_CLIENT_ID), mode, session_sort);
+        rebuild_session_items_for_picker_mode(
+            &state,
+            Some(active_client_id.as_str()),
+            mode,
+            session_sort,
+        );
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
+    #[cfg(feature = "embers")]
+    let mut embers_preview_provider = match backend {
+        RuntimeBackend::Tmux => None,
+        RuntimeBackend::Embers(client) => Some(EmbersPanePreviewProvider::new(client.clone())),
+    };
     let mut details_preview_provider = SessionDetailsPreviewProvider {
         state: state.clone(),
     };
@@ -835,9 +1320,13 @@ fn run_surface(
     let zoxide = CommandZoxideProvider::new();
     let current_directory = env::current_dir()?;
     let sidebar_command = sidebar_surface_command(env::current_exe()?);
-    let mut sidebar_runtime = sidebar_runtime(&tmux, kind)?;
+    let mut sidebar_runtime = match backend {
+        RuntimeBackend::Tmux => tmux_sidebar_runtime(&tmux, kind)?,
+        #[cfg(feature = "embers")]
+        RuntimeBackend::Embers(client) => embers_sidebar_runtime(client, kind)?,
+    };
     let saved_sidebar_state = match &sidebar_runtime {
-        Some(runtime) => load_sidebar_ui_state(&runtime.session_name)?,
+        Some(runtime) => load_sidebar_ui_state(runtime.session_name())?,
         None => None,
     };
     if let Some(saved_state) = &saved_sidebar_state
@@ -847,7 +1336,7 @@ fn run_surface(
         (session_items, pending_branch_names, branch_status_updates) =
             rebuild_session_items_for_picker_mode(
                 &state,
-                Some(DEFAULT_CLIENT_ID),
+                Some(active_client_id.as_str()),
                 mode,
                 session_sort,
             );
@@ -885,28 +1374,87 @@ fn run_surface(
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
+    let mut teardown = TerminalTeardown::active();
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let result = loop {
         pane_preview_provider.max_lines = preview_line_budget(&terminal, show_help)?;
+        #[cfg(feature = "embers")]
+        if let Some(provider) = embers_preview_provider.as_mut() {
+            provider.max_lines = preview_line_budget(&terminal, show_help)?;
+        }
 
-        if let Some(runtime) = &sidebar_runtime
-            && sidebar_requires_handoff(&tmux, runtime)?
-        {
-            persist_sidebar_ui_state(
-                runtime,
-                &session_items,
-                &query,
-                surface_kind,
-                session_sort,
-                selected,
-            )?;
-            reconcile_sidebar_for_current_context(
+        if let Some(runtime) = &mut sidebar_runtime {
+            #[cfg(feature = "embers")]
+            let requires_handoff = sidebar_requires_handoff(
                 &tmux,
-                &sidebar_command,
-                runtime.pane_id.as_deref(),
+                match backend {
+                    RuntimeBackend::Tmux => None,
+                    RuntimeBackend::Embers(client) => Some(client.as_ref()),
+                },
+                runtime,
             )?;
-            break Ok(());
+            #[cfg(not(feature = "embers"))]
+            let requires_handoff = sidebar_requires_handoff(&tmux, runtime)?;
+
+            if !requires_handoff {
+                // Stay on the current surface.
+            } else {
+                persist_sidebar_ui_state(
+                    runtime,
+                    &session_items,
+                    &query,
+                    surface_kind,
+                    session_sort,
+                    selected,
+                )?;
+                match (&runtime.target, backend) {
+                    (SidebarTarget::Tmux { pane_id, .. }, RuntimeBackend::Tmux) => {
+                        reconcile_sidebar_for_current_context(
+                            &tmux,
+                            &sidebar_command,
+                            pane_id.as_deref(),
+                        )?;
+                        break Ok(());
+                    }
+                    #[cfg(feature = "embers")]
+                    (SidebarTarget::Embers { buffer_id }, RuntimeBackend::Embers(client)) => {
+                        let new_session_name = client.join_buffer_to_current_session_root(
+                            buffer_id,
+                            EmbersJoinPlacement::Left,
+                            Some(SIDEBAR_PANE_WIDTH),
+                            true,
+                        )?;
+                        runtime.rename_session(new_session_name);
+                        let reloaded = reload_sidebar_runtime_state(SidebarReloadContext {
+                            config,
+                            backend,
+                            picker_mode,
+                            default_kind: kind,
+                            runtime_session_name: runtime.session_name(),
+                            session_sort: &mut session_sort,
+                            query: &mut query,
+                            selected: &mut selected,
+                            surface_kind: &mut surface_kind,
+                        })?;
+                        (
+                            details_preview_provider.state,
+                            session_items,
+                            pending_branch_names,
+                            branch_status_updates,
+                        ) = reloaded;
+                        deferred_branch_status.clear();
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                        if preview_enabled {
+                            preview = Some(Vec::new());
+                        }
+                        continue;
+                    }
+                    #[cfg(feature = "embers")]
+                    _ => {}
+                }
+            }
         }
 
         let mut filtered = match input_mode {
@@ -984,8 +1532,19 @@ fn run_surface(
             preview_session_id = None;
             preview_refreshed_at = None;
         } else if should_refresh_preview && let Some(item) = selected_item {
+            let session_preview_provider: &dyn PreviewProvider = match preview_mode {
+                #[cfg(feature = "embers")]
+                PreviewMode::Pane => match (&embers_preview_provider, backend) {
+                    (_, RuntimeBackend::Tmux) => &pane_preview_provider,
+                    (Some(provider), RuntimeBackend::Embers(_)) => provider,
+                    (None, RuntimeBackend::Embers(_)) => &details_preview_provider,
+                },
+                #[cfg(not(feature = "embers"))]
+                PreviewMode::Pane => &pane_preview_provider,
+                PreviewMode::Details => &details_preview_provider,
+            };
             let combined_provider = CombinedPreviewProvider {
-                pane: &pane_preview_provider,
+                session: session_preview_provider,
                 filesystem: &filesystem_preview_provider,
             };
             preview = Some(generate_preview(
@@ -1054,6 +1613,38 @@ fn run_surface(
                         update.dirty,
                     );
                 }
+            }
+            continue;
+        }
+
+        #[cfg(feature = "embers")]
+        if matches!(backend, RuntimeBackend::Embers(_)) && backend.poll_updates()? {
+            let selected_session_id = filtered.get(selected).map(|item| item.session_id.clone());
+            let reloaded_state = load_domain_state_with_zoxide(backend, zoxide_entries.clone())?;
+            active_client_id = reloaded_state.client_id;
+            (session_items, pending_branch_names, branch_status_updates) =
+                rebuild_session_items_for_picker_mode(
+                    &reloaded_state.state,
+                    Some(active_client_id.as_str()),
+                    picker_mode,
+                    session_sort,
+                );
+            details_preview_provider.state = reloaded_state.state.clone();
+            deferred_branch_status.clear();
+            selected =
+                selected_index_for_session(&session_items, &query, selected_session_id.as_deref())
+                    .or_else(|| {
+                        selected_index_for_session(
+                            &session_items,
+                            &query,
+                            current_session_id(&session_items),
+                        )
+                    })
+                    .unwrap_or(0);
+            preview_session_id = None;
+            preview_refreshed_at = None;
+            if preview_enabled {
+                preview = Some(Vec::new());
             }
             continue;
         }
@@ -1151,24 +1742,81 @@ fn run_surface(
                                 selected,
                             )?;
                         }
-                        let activated = activate_filter_selection(
-                            &tmux,
-                            &zoxide,
-                            &filtered,
-                            selected,
-                            &query,
-                            &current_directory,
-                            matches!(activate_intent, UiIntent::CreateSessionFromQuery),
-                        )?;
+                        let activated = match backend {
+                            RuntimeBackend::Tmux => activate_filter_selection(
+                                &tmux,
+                                &zoxide,
+                                &filtered,
+                                selected,
+                                &query,
+                                &current_directory,
+                                matches!(activate_intent, UiIntent::CreateSessionFromQuery),
+                            )?,
+                            #[cfg(feature = "embers")]
+                            RuntimeBackend::Embers(client) => activate_filter_selection(
+                                Arc::clone(client),
+                                &zoxide,
+                                &filtered,
+                                selected,
+                                &query,
+                                &current_directory,
+                                matches!(activate_intent, UiIntent::CreateSessionFromQuery),
+                            )?,
+                        };
                         if activated {
-                            if let Some(runtime) = &sidebar_runtime {
-                                reconcile_sidebar_for_current_context(
-                                    &tmux,
-                                    &sidebar_command,
-                                    runtime.pane_id.as_deref(),
-                                )?;
+                            match (sidebar_runtime.as_mut(), backend) {
+                                (Some(runtime), RuntimeBackend::Tmux) => {
+                                    reconcile_sidebar_for_current_context(
+                                        &tmux,
+                                        &sidebar_command,
+                                        runtime.tmux_pane_id(),
+                                    )?;
+                                    break Ok(());
+                                }
+                                #[cfg(feature = "embers")]
+                                (Some(runtime), RuntimeBackend::Embers(client))
+                                    if runtime.embers_buffer_id().is_some() =>
+                                {
+                                    let buffer_id = runtime
+                                        .embers_buffer_id()
+                                        .expect("checked embers sidebar buffer exists")
+                                        .to_string();
+                                    let new_session_name = client
+                                        .join_buffer_to_current_session_root(
+                                            &buffer_id,
+                                            EmbersJoinPlacement::Left,
+                                            Some(SIDEBAR_PANE_WIDTH),
+                                            true,
+                                        )?;
+                                    runtime.rename_session(new_session_name);
+                                    let reloaded =
+                                        reload_sidebar_runtime_state(SidebarReloadContext {
+                                            config,
+                                            backend,
+                                            picker_mode,
+                                            default_kind: kind,
+                                            runtime_session_name: runtime.session_name(),
+                                            session_sort: &mut session_sort,
+                                            query: &mut query,
+                                            selected: &mut selected,
+                                            surface_kind: &mut surface_kind,
+                                        })?;
+                                    (
+                                        details_preview_provider.state,
+                                        session_items,
+                                        pending_branch_names,
+                                        branch_status_updates,
+                                    ) = reloaded;
+                                    deferred_branch_status.clear();
+                                    preview_session_id = None;
+                                    preview_refreshed_at = None;
+                                    if preview_enabled {
+                                        preview = Some(Vec::new());
+                                    }
+                                    continue;
+                                }
+                                _ => break Ok(()),
                             }
-                            break Ok(());
                         }
                     }
                     InputMode::Rename {
@@ -1186,16 +1834,23 @@ fn run_surface(
                             continue;
                         }
 
-                        tmux.rename_session(&session_id, &new_name)?;
-                        let reloaded_state = load_domain_state()?;
+                        match backend {
+                            RuntimeBackend::Tmux => tmux.rename_session(&session_id, &new_name)?,
+                            #[cfg(feature = "embers")]
+                            RuntimeBackend::Embers(client) => {
+                                client.rename_session(&session_id, &new_name)?
+                            }
+                        }
+                        let reloaded_state = load_domain_state(backend)?;
+                        active_client_id = reloaded_state.client_id;
                         (session_items, pending_branch_names, branch_status_updates) =
                             rebuild_session_items_for_picker_mode(
-                                &reloaded_state,
-                                Some(DEFAULT_CLIENT_ID),
+                                &reloaded_state.state,
+                                Some(active_client_id.as_str()),
                                 picker_mode,
                                 session_sort,
                             );
-                        details_preview_provider.state = reloaded_state.clone();
+                        details_preview_provider.state = reloaded_state.state.clone();
                         deferred_branch_status.clear();
                         query = filter_query.clone();
                         input_mode = InputMode::Filter;
@@ -1208,10 +1863,10 @@ fn run_surface(
                             preview = Some(Vec::new());
                         }
                         if let Some(runtime) = sidebar_runtime.as_mut()
-                            && runtime.session_name == session_id
+                            && runtime.session_name() == session_id
                         {
-                            clear_sidebar_ui_state(&runtime.session_name)?;
-                            runtime.session_name = new_name;
+                            clear_sidebar_ui_state(runtime.session_name())?;
+                            runtime.rename_session(new_name);
                         }
                     }
                 },
@@ -1243,16 +1898,21 @@ fn run_surface(
                         )
                     {
                         let session_id = item.session_id.clone();
-                        tmux.kill_session(&session_id)?;
-                        let reloaded_state = load_domain_state()?;
+                        match backend {
+                            RuntimeBackend::Tmux => tmux.kill_session(&session_id)?,
+                            #[cfg(feature = "embers")]
+                            RuntimeBackend::Embers(client) => client.kill_session(&session_id)?,
+                        }
+                        let reloaded_state = load_domain_state(backend)?;
+                        active_client_id = reloaded_state.client_id;
                         (session_items, pending_branch_names, branch_status_updates) =
                             rebuild_session_items_for_picker_mode(
-                                &reloaded_state,
-                                Some(DEFAULT_CLIENT_ID),
+                                &reloaded_state.state,
+                                Some(active_client_id.as_str()),
                                 picker_mode,
                                 session_sort,
                             );
-                        details_preview_provider.state = reloaded_state.clone();
+                        details_preview_provider.state = reloaded_state.state.clone();
                         deferred_branch_status.clear();
                         preview_session_id = None;
                         preview_refreshed_at = None;
@@ -1264,12 +1924,25 @@ fn run_surface(
                 UiIntent::Close => match &input_mode {
                     InputMode::Filter => {
                         if let Some(runtime) = &sidebar_runtime {
-                            disable_sidebar_for_session(
-                                &tmux,
-                                &runtime.session_name,
-                                runtime.pane_id.as_deref(),
-                            )?;
-                            clear_sidebar_ui_state(&runtime.session_name)?;
+                            match (&runtime.target, backend) {
+                                (SidebarTarget::Tmux { pane_id, .. }, RuntimeBackend::Tmux) => {
+                                    disable_sidebar_for_session(
+                                        &tmux,
+                                        runtime.session_name(),
+                                        pane_id.as_deref(),
+                                    )?;
+                                }
+                                #[cfg(feature = "embers")]
+                                (
+                                    SidebarTarget::Embers { buffer_id },
+                                    RuntimeBackend::Embers(client),
+                                ) => {
+                                    client.detach_buffer(buffer_id)?;
+                                }
+                                #[cfg(feature = "embers")]
+                                _ => {}
+                            }
+                            clear_sidebar_ui_state(runtime.session_name())?;
                         }
                         break Ok(());
                     }
@@ -1287,15 +1960,16 @@ fn run_surface(
                             PickerMode::Worktree => PickerMode::AllSessions,
                         };
 
-                        let reloaded_state = load_domain_state()?;
+                        let reloaded_state = load_domain_state(backend)?;
+                        active_client_id = reloaded_state.client_id;
                         (session_items, pending_branch_names, branch_status_updates) =
                             rebuild_session_items_for_picker_mode(
-                                &reloaded_state,
-                                Some(DEFAULT_CLIENT_ID),
+                                &reloaded_state.state,
+                                Some(active_client_id.as_str()),
                                 picker_mode,
                                 session_sort,
                             );
-                        details_preview_provider.state = reloaded_state.clone();
+                        details_preview_provider.state = reloaded_state.state.clone();
                         deferred_branch_status.clear();
                         selected = 0;
                         preview_session_id = None;
@@ -1320,9 +1994,7 @@ fn run_surface(
         show_help = matches!(surface_kind, SurfaceKind::Picker);
     };
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    teardown.restore(&mut terminal)?;
     result
 }
 
@@ -1446,7 +2118,7 @@ fn sidebar_surface_command(program: PathBuf) -> PopupCommand {
     }
 }
 
-fn sidebar_runtime(
+fn tmux_sidebar_runtime(
     tmux: &impl TmuxClient,
     kind: SurfaceKind,
 ) -> Result<Option<SidebarRuntime>, Box<dyn Error>> {
@@ -1467,20 +2139,63 @@ fn sidebar_runtime(
 
     Ok(Some(SidebarRuntime {
         session_name,
-        home_window_index,
-        pane_id: env::var("TMUX_PANE").ok(),
+        target: SidebarTarget::Tmux {
+            home_window_index,
+            pane_id: env::var("TMUX_PANE").ok(),
+        },
+    }))
+}
+
+#[cfg(feature = "embers")]
+fn embers_sidebar_runtime(
+    embers: &EmbersClient,
+    kind: SurfaceKind,
+) -> Result<Option<SidebarRuntime>, Box<dyn Error>> {
+    if !matches!(
+        kind,
+        SurfaceKind::SidebarCompact | SurfaceKind::SidebarExpanded
+    ) || env::var(EMBERS_SURFACE_ENV).ok().as_deref() != Some(EMBERS_SIDEBAR_PANE_SURFACE)
+    {
+        return Ok(None);
+    }
+
+    let session_name = embers
+        .current_session_name()?
+        .ok_or_else(|| "embers sidebar requires an active session".to_string())?;
+    let buffer_id = embers
+        .focused_buffer_id()?
+        .ok_or_else(|| "embers sidebar could not resolve its focused buffer".to_string())?;
+    Ok(Some(SidebarRuntime {
+        session_name,
+        target: SidebarTarget::Embers { buffer_id },
     }))
 }
 
 fn sidebar_requires_handoff(
     tmux: &impl TmuxClient,
+    #[cfg(feature = "embers")] embers: Option<&EmbersClient>,
     runtime: &SidebarRuntime,
-) -> Result<bool, TmuxError> {
-    let context = tmux.current_context()?;
-    Ok(
-        context.session_name.as_deref() != Some(runtime.session_name.as_str())
-            || context.window_index != Some(runtime.home_window_index),
-    )
+) -> Result<bool, Box<dyn Error>> {
+    match &runtime.target {
+        SidebarTarget::Tmux {
+            home_window_index, ..
+        } => {
+            let context = tmux.current_context()?;
+            Ok(
+                context.session_name.as_deref() != Some(runtime.session_name())
+                    || context.window_index != Some(*home_window_index),
+            )
+        }
+        #[cfg(feature = "embers")]
+        SidebarTarget::Embers { .. } => {
+            let Some(embers) = embers else {
+                return Ok(false);
+            };
+            Ok(embers
+                .current_session_name()?
+                .is_some_and(|session_name| session_name != runtime.session_name()))
+        }
+    }
 }
 
 fn reconcile_sidebar_for_current_context(
@@ -1653,7 +2368,7 @@ fn persist_sidebar_ui_state(
         },
         sort_mode: Some(sort_mode),
     };
-    let path = sidebar_state_path(&runtime.session_name);
+    let path = sidebar_state_path(runtime.session_name());
     let directory = path
         .parent()
         .ok_or_else(|| format!("missing parent directory for `{}`", path.display()))?;
@@ -1687,13 +2402,132 @@ fn clear_sidebar_ui_state(session_name: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn load_domain_state() -> Result<DomainState, Box<dyn Error>> {
-    let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
-    let tmux = backend.snapshot()?;
-    let zoxide = CommandZoxideProvider::new()
+fn load_zoxide_entries() -> Vec<wisp_zoxide::DirectoryEntry> {
+    CommandZoxideProvider::new()
         .load_entries(500)
+        .unwrap_or_default()
+}
+
+struct LoadedDomainState {
+    state: DomainState,
+    client_id: String,
+}
+
+fn load_domain_state(backend: &RuntimeBackend) -> Result<LoadedDomainState, Box<dyn Error>> {
+    load_domain_state_with_zoxide(backend, load_zoxide_entries())
+}
+
+/// Build domain state from a fresh backend snapshot but a caller-supplied set of
+/// zoxide entries. Reused by the embers update loop so a `zoxide query`
+/// subprocess is not spawned on every server event — only the backend snapshot
+/// is refreshed, while the (rarely changing) zoxide list is carried over.
+fn load_domain_state_with_zoxide(
+    backend: &RuntimeBackend,
+    zoxide: Vec<wisp_zoxide::DirectoryEntry>,
+) -> Result<LoadedDomainState, Box<dyn Error>> {
+    let snapshot = match backend {
+        RuntimeBackend::Tmux => {
+            let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
+            BackendSnapshot::Tmux(backend.snapshot()?)
+        }
+        #[cfg(feature = "embers")]
+        RuntimeBackend::Embers(client) => BackendSnapshot::Embers(client.snapshot()?),
+    };
+    let client_id = snapshot_client_id(&snapshot);
+    let state = build_domain_state(&CandidateSources {
+        backend: snapshot,
+        zoxide,
+    });
+    Ok(LoadedDomainState { state, client_id })
+}
+
+fn snapshot_client_id(snapshot: &BackendSnapshot) -> String {
+    match snapshot {
+        BackendSnapshot::Tmux(_) => DEFAULT_CLIENT_ID.to_string(),
+        #[cfg(feature = "embers")]
+        BackendSnapshot::Embers(snapshot) => snapshot
+            .context
+            .client_id
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string()),
+    }
+}
+
+#[cfg(feature = "embers")]
+type SidebarReload = (
+    DomainState,
+    Vec<SessionListItem>,
+    VecDeque<GitWorkItem>,
+    mpsc::Receiver<GitStatusUpdate>,
+);
+
+#[cfg(feature = "embers")]
+struct SidebarReloadContext<'a> {
+    config: &'a ResolvedConfig,
+    backend: &'a RuntimeBackend,
+    picker_mode: PickerMode,
+    default_kind: SurfaceKind,
+    runtime_session_name: &'a str,
+    session_sort: &'a mut SessionSortMode,
+    query: &'a mut String,
+    selected: &'a mut usize,
+    surface_kind: &'a mut SurfaceKind,
+}
+
+#[cfg(feature = "embers")]
+fn reload_sidebar_runtime_state(
+    context: SidebarReloadContext<'_>,
+) -> Result<SidebarReload, Box<dyn Error>> {
+    let SidebarReloadContext {
+        config,
+        backend,
+        picker_mode,
+        default_kind,
+        runtime_session_name,
+        session_sort,
+        query,
+        selected,
+        surface_kind,
+    } = context;
+
+    let reloaded_state = load_domain_state(backend)?;
+    *session_sort = config.ui.session_sort;
+    let saved_sidebar_state = load_sidebar_ui_state(runtime_session_name)?;
+    if let Some(saved_state) = &saved_sidebar_state
+        && let Some(saved_sort_mode) = saved_state.sort_mode
+    {
+        *session_sort = saved_sort_mode;
+    }
+    let (session_items, pending_branch_names, branch_status_updates) =
+        rebuild_session_items_for_picker_mode(
+            &reloaded_state.state,
+            Some(reloaded_state.client_id.as_str()),
+            picker_mode,
+            *session_sort,
+        );
+    *query = saved_sidebar_state
+        .as_ref()
+        .map(|state| state.query.clone())
         .unwrap_or_default();
-    Ok(build_domain_state(&CandidateSources { tmux, zoxide }))
+    *surface_kind = saved_sidebar_state
+        .as_ref()
+        .map(|state| state.kind)
+        .unwrap_or(default_kind);
+    *selected = saved_sidebar_state
+        .as_ref()
+        .and_then(|state| {
+            selected_index_for_session(&session_items, query, state.selected_session_id.as_deref())
+        })
+        .or_else(|| {
+            selected_index_for_session(&session_items, query, current_session_id(&session_items))
+        })
+        .unwrap_or(0);
+    Ok((
+        reloaded_state.state,
+        session_items,
+        pending_branch_names,
+        branch_status_updates,
+    ))
 }
 
 fn git_work_items(state: &DomainState) -> VecDeque<GitWorkItem> {
@@ -1762,11 +2596,28 @@ fn spawn_git_status_workers(work_items: Vec<GitWorkItem>) -> mpsc::Receiver<GitS
         .unwrap_or(1)
         .max(1);
 
-    for _ in 0..worker_count {
+    for worker_index in 0..worker_count {
         let sender = sender.clone();
         let queue = Arc::clone(&queue);
         thread::spawn(move || {
-            while let Some(work_item) = queue.lock().ok().and_then(|mut queue| queue.pop_front()) {
+            let mut reported_poison = false;
+            loop {
+                let work_item = match queue.lock() {
+                    Ok(mut queue) => queue.pop_front(),
+                    Err(poison) => {
+                        if !reported_poison {
+                            eprintln!(
+                                "wisp: git status worker {worker_index} recovered from a poisoned work queue; continuing"
+                            );
+                            reported_poison = true;
+                        }
+                        poison.into_inner().pop_front()
+                    }
+                };
+                let Some(work_item) = work_item else {
+                    break;
+                };
+
                 if let Some((sync, dirty)) = git::branch_status_for_directory(&work_item.path) {
                     let _ = sender.send(GitStatusUpdate {
                         session_id: work_item.session_id,
@@ -1879,9 +2730,9 @@ mod tests {
 
     use crate::{
         SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, STATUSLINE_REFRESH_COMMAND,
-        STATUSLINE_REFRESH_HOOKS, SidebarRuntime, StatuslineGroupCommand, StatuslineRenderCommand,
-        StatuslineSubcommand, SurfaceKind, activate_filter_selection, apply_session_sort,
-        clear_sidebar_ui_state, create_session_from_query, current_session_id,
+        STATUSLINE_REFRESH_HOOKS, SidebarRuntime, SidebarTarget, StatuslineGroupCommand,
+        StatuslineRenderCommand, StatuslineSubcommand, SurfaceKind, activate_filter_selection,
+        apply_session_sort, clear_sidebar_ui_state, create_session_from_query, current_session_id,
         disable_sidebar_for_session, filter_items, install_statusline_refresh_hooks,
         load_sidebar_ui_state, persist_sidebar_ui_state, picker_bindings,
         reconcile_sidebar_for_current_context, selected_index_for_session,
@@ -2244,8 +3095,10 @@ mod tests {
 
         let runtime = SidebarRuntime {
             session_name: session_name.clone(),
-            home_window_index: 1,
-            pane_id: Some("%1".to_string()),
+            target: SidebarTarget::Tmux {
+                home_window_index: 1,
+                pane_id: Some("%1".to_string()),
+            },
         };
         let items = vec![session_item("alpha"), session_item("beta")];
         persist_sidebar_ui_state(
@@ -2308,22 +3161,38 @@ mod tests {
         });
         let runtime = SidebarRuntime {
             session_name: "alpha".to_string(),
-            home_window_index: 1,
-            pane_id: Some("%1".to_string()),
+            target: SidebarTarget::Tmux {
+                home_window_index: 1,
+                pane_id: Some("%1".to_string()),
+            },
         };
 
-        assert!(sidebar_requires_handoff(&tmux, &runtime).expect("handoff should evaluate"));
-        assert!(
-            !sidebar_requires_handoff(
-                &StubTmuxClient::default().with_context(TmuxContext {
-                    session_name: Some("alpha".to_string()),
-                    window_index: Some(1),
-                    ..TmuxContext::default()
-                }),
-                &runtime,
-            )
-            .expect("handoff should evaluate")
+        #[cfg(feature = "embers")]
+        let handoff = sidebar_requires_handoff(&tmux, None, &runtime);
+        #[cfg(not(feature = "embers"))]
+        let handoff = sidebar_requires_handoff(&tmux, &runtime);
+        assert!(handoff.expect("handoff should evaluate"));
+
+        #[cfg(feature = "embers")]
+        let stable_handoff = sidebar_requires_handoff(
+            &StubTmuxClient::default().with_context(TmuxContext {
+                session_name: Some("alpha".to_string()),
+                window_index: Some(1),
+                ..TmuxContext::default()
+            }),
+            None,
+            &runtime,
         );
+        #[cfg(not(feature = "embers"))]
+        let stable_handoff = sidebar_requires_handoff(
+            &StubTmuxClient::default().with_context(TmuxContext {
+                session_name: Some("alpha".to_string()),
+                window_index: Some(1),
+                ..TmuxContext::default()
+            }),
+            &runtime,
+        );
+        assert!(!stable_handoff.expect("handoff should evaluate"));
     }
 
     #[test]
@@ -2849,6 +3718,50 @@ mod tests {
             selected_index_for_session(&items, "", Some("alpha")),
             Some(1)
         );
+    }
+
+    #[test]
+    fn snapshot_client_id_defaults_tmux_to_default_client() {
+        let snapshot = wisp_app::BackendSnapshot::Tmux(TmuxSnapshot {
+            context: TmuxContext::default(),
+            capabilities: TmuxCapabilities {
+                version: TmuxVersion {
+                    major: 3,
+                    minor: 4,
+                    patch: None,
+                },
+                supports_popup: true,
+                supports_multi_status_lines: true,
+                supports_status_mouse_ranges: true,
+                mouse_enabled: true,
+            },
+            sessions: Vec::new(),
+            windows: Vec::new(),
+        });
+
+        assert_eq!(
+            crate::snapshot_client_id(&snapshot),
+            crate::DEFAULT_CLIENT_ID
+        );
+    }
+
+    #[cfg(feature = "embers")]
+    #[test]
+    fn snapshot_client_id_uses_embers_snapshot_client() {
+        let snapshot = wisp_app::BackendSnapshot::Embers(wisp_embers::EmbersSnapshot {
+            context: wisp_embers::EmbersContext {
+                client_id: Some("client-42".to_string()),
+                current_session_name: None,
+                current_window_index: None,
+                pane_id: None,
+                previous_session_name: None,
+            },
+            sessions: Vec::new(),
+            windows: Vec::new(),
+            panes: Vec::new(),
+        });
+
+        assert_eq!(crate::snapshot_client_id(&snapshot), "client-42");
     }
 
     #[test]

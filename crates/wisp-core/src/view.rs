@@ -318,7 +318,7 @@ pub fn derive_status_items(state: &DomainState, client_id: Option<&str>) -> Vec<
         .iter()
         .map(|(session_id, session)| StatusSessionItem {
             session_id: session
-                .tmux_id
+                .native_id
                 .clone()
                 .unwrap_or_else(|| session_id.clone()),
             session_name: session.name.clone(),
@@ -378,7 +378,7 @@ mod tests {
                 "alpha".to_string(),
                 SessionRecord {
                     id: "alpha".to_string(),
-                    tmux_id: Some("$1".to_string()),
+                    native_id: Some("$1".to_string()),
                     name: "alpha".to_string(),
                     attached: true,
                     windows: BTreeMap::from([(
@@ -472,7 +472,7 @@ mod tests {
             "beta".to_string(),
             SessionRecord {
                 id: "beta".to_string(),
-                tmux_id: Some("$2".to_string()),
+                native_id: Some("$2".to_string()),
                 name: "beta".to_string(),
                 attached: false,
                 windows: BTreeMap::new(),
@@ -485,7 +485,7 @@ mod tests {
             "aardvark".to_string(),
             SessionRecord {
                 id: "aardvark".to_string(),
-                tmux_id: Some("$3".to_string()),
+                native_id: Some("$3".to_string()),
                 name: "aardvark".to_string(),
                 attached: false,
                 windows: BTreeMap::new(),
