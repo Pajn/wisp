@@ -77,11 +77,12 @@ pub enum GitBranchSync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListItemKind {
-    Info,            // informational row, not an actionable session
-    Session,         // regular tmux session (not in a worktree)
-    WorktreeSession, // session running in a worktree
-    Worktree,        // worktree with no session
-    Zoxide,          // zoxide directory match
+    Info,               // informational row, not an actionable session
+    Session,            // regular tmux session (not in a worktree)
+    WorktreeSession,    // session running in a worktree
+    Worktree,           // worktree with no session
+    Zoxide,             // zoxide directory match
+    CreateTempWorktree, // action: create a new Kindra temporary worktree
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -35,6 +35,7 @@ use wisp_core::{
 #[cfg(feature = "embers")]
 use wisp_embers::{EmbersClient, EmbersJoinPlacement};
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
+use wisp_kindra::{CommandKindraProvider, KindraProvider};
 use wisp_preview::{
     ActivePanePreviewProvider, FilesystemPreviewProvider, PreviewProvider,
     SessionDetailsPreviewProvider,
@@ -1062,9 +1063,62 @@ fn apply_reloaded_state(
     deferred_branch_status.clear();
 }
 
+/// A worktree-mode repository that has Kindra temporary worktrees configured,
+/// together with the trunk branch new temp worktrees should branch off of.
+#[derive(Debug, Clone)]
+struct KindraTempContext {
+    repo_root: PathBuf,
+    trunk: String,
+}
+
+/// Derives a git branch name from the picker query for a new temp worktree.
+///
+/// Whitespace runs collapse to single dashes and surrounding dashes are trimmed,
+/// keeping slashes so users can still type `feature/foo`. Returns `None` when the
+/// query is empty or would produce a name git would reject (e.g. `fix: crash`,
+/// `foo..bar`, or `foo.lock`), so the invalid row never reaches `kin wt temp`.
+fn kindra_temp_branch_name(query: &str) -> Option<String> {
+    let collapsed = query.split_whitespace().collect::<Vec<_>>().join("-");
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.is_empty() || !is_valid_git_branch_name(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Returns whether `name` is a valid git branch name per `git check-ref-format`.
+///
+/// Covers the subset of rules a normalized picker slug can still violate: a stray
+/// `:`/`~`/`^` from the query, `..`, a leading/trailing dot, or a `.lock` suffix.
+fn is_valid_git_branch_name(name: &str) -> bool {
+    if name.is_empty() || name == "@" {
+        return false;
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return false;
+    }
+    if name.starts_with('.') || name.ends_with('.') {
+        return false;
+    }
+    if name.contains("..") || name.contains("@{") {
+        return false;
+    }
+    if name.chars().any(|c| {
+        c.is_ascii_control() || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+    }) {
+        return false;
+    }
+    name.split('/').all(|component| {
+        !component.is_empty() && !component.starts_with('.') && !component.ends_with(".lock")
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn activate_filter_selection(
     launcher: impl SessionLauncher,
     zoxide: &impl ZoxideProvider,
+    kindra: &impl KindraProvider,
     filtered: &[SessionListItem],
     selected: usize,
     query: &str,
@@ -1097,6 +1151,22 @@ fn activate_filter_selection(
                     if !folder_name.is_empty() {
                         return create_session_with_basename(launcher, folder_name, path);
                     }
+                }
+                return Ok(false);
+            }
+            wisp_core::SessionListItemKind::CreateTempWorktree => {
+                // `worktree_path` carries the repo root to run `kin` in and
+                // `worktree_branch` the new branch name derived from the query.
+                if let (Some(repo_root), Some(branch)) =
+                    (&item.worktree_path, &item.worktree_branch)
+                {
+                    let trunk = git::trunk_branch(repo_root);
+                    let worktree_path = kindra.create_temp_worktree(repo_root, branch, &trunk)?;
+                    let basename = worktree_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(branch.as_str());
+                    return create_session_with_basename(launcher, basename, &worktree_path);
                 }
                 return Ok(false);
             }
@@ -1381,6 +1451,7 @@ fn run_surface(
     let filesystem_preview_provider = FilesystemPreviewProvider::default();
     let tmux = CommandTmuxClient::new();
     let zoxide = CommandZoxideProvider::new();
+    let kindra = CommandKindraProvider::new();
     let current_directory = env::current_dir()?;
     let sidebar_command = sidebar_surface_command(env::current_exe()?);
     let mut sidebar_runtime = match backend {
@@ -1434,6 +1505,11 @@ fn run_surface(
     let mut deferred_branch_status = BTreeMap::new();
     let mut last_zoxide_query: String = String::new();
     let mut last_zoxide_match: Option<wisp_zoxide::DirectoryEntry> = None;
+    // Cache of the worktree-mode repo root we last probed for Kindra temp-worktree
+    // support, plus the resolved trunk. Detection shells out to git/kin, so we only
+    // recompute it when the repo root under the cursor changes.
+    let mut last_kindra_repo_root: Option<Option<PathBuf>> = None;
+    let mut kindra_temp_context: Option<KindraTempContext> = None;
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -1562,6 +1638,45 @@ fn run_surface(
         } else if query.trim().is_empty() {
             last_zoxide_query.clear();
             last_zoxide_match = None;
+        }
+        if matches!(input_mode, InputMode::Filter) && picker_mode == PickerMode::Worktree {
+            let repo_root = git::worktree_repo_root(
+                &details_preview_provider.state,
+                Some(active_client_id.as_str()),
+            );
+            if last_kindra_repo_root.as_ref() != Some(&repo_root) {
+                last_kindra_repo_root = Some(repo_root.clone());
+                kindra_temp_context = repo_root
+                    .filter(|root| kindra.temp_worktrees_configured(root))
+                    .map(|root| {
+                        let trunk = git::trunk_branch(&root);
+                        KindraTempContext {
+                            repo_root: root,
+                            trunk,
+                        }
+                    });
+            }
+            if let Some(context) = &kindra_temp_context
+                && let Some(branch) = kindra_temp_branch_name(&query)
+            {
+                filtered.push(SessionListItem {
+                    session_id: format!("kindra-temp:{branch}"),
+                    label: branch.clone(),
+                    kind: wisp_core::SessionListItemKind::CreateTempWorktree,
+                    is_current: false,
+                    is_previous: false,
+                    last_activity: None,
+                    attached: false,
+                    attention: wisp_core::AttentionBadge::None,
+                    attention_count: 0,
+                    active_window_label: None,
+                    path_hint: Some(format!("new temp worktree from {}", context.trunk)),
+                    command_hint: None,
+                    git_branch: None,
+                    worktree_path: Some(context.repo_root.clone()),
+                    worktree_branch: Some(branch),
+                });
+            }
         }
         if selected >= filtered.len() {
             selected = filtered.len().saturating_sub(1);
@@ -1810,6 +1925,7 @@ fn run_surface(
                             RuntimeBackend::Tmux => activate_filter_selection(
                                 &tmux,
                                 &zoxide,
+                                &kindra,
                                 &filtered,
                                 selected,
                                 &query,
@@ -1820,6 +1936,7 @@ fn run_surface(
                             RuntimeBackend::Embers(client) => activate_filter_selection(
                                 Arc::clone(client),
                                 &zoxide,
+                                &kindra,
                                 &filtered,
                                 selected,
                                 &query,
@@ -2144,6 +2261,13 @@ fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> V
                 })
                 .map(|content| content.body)
                 .unwrap_or_else(|error| vec![error.to_string()])
+        }
+        wisp_core::SessionListItemKind::CreateTempWorktree => {
+            let mut lines = vec![format!("Create temporary worktree '{}'", item.label)];
+            if let Some(hint) = &item.path_hint {
+                lines.push(hint.clone());
+            }
+            lines
         }
         wisp_core::SessionListItemKind::Zoxide => {
             // For zoxide matches, show directory preview using worktree_path
@@ -2787,6 +2911,7 @@ mod tests {
     };
 
     use wisp_config::{KeyAction, ResolvedConfig, SessionSortMode};
+    use wisp_kindra::{KindraError, KindraProvider};
     use wisp_status::StatusRenderMode;
     use wisp_tmux::{
         PopupCommand, PopupOptions, SidebarPaneSpec, TmuxCapabilities, TmuxClient, TmuxContext,
@@ -3032,6 +3157,43 @@ mod tests {
                 .iter()
                 .find(|(candidate_query, _)| candidate_query == query)
                 .map(|(_, entry)| entry.clone()))
+        }
+    }
+
+    #[derive(Default)]
+    struct StubKindraProvider {
+        configured: bool,
+        created: RefCell<Vec<(PathBuf, String, String)>>,
+        result_path: Option<PathBuf>,
+    }
+
+    impl StubKindraProvider {
+        fn configured_with(path: &Path) -> Self {
+            Self {
+                configured: true,
+                created: RefCell::new(Vec::new()),
+                result_path: Some(path.to_path_buf()),
+            }
+        }
+    }
+
+    impl KindraProvider for StubKindraProvider {
+        fn temp_worktrees_configured(&self, _repo_root: &Path) -> bool {
+            self.configured
+        }
+
+        fn create_temp_worktree(
+            &self,
+            repo_root: &Path,
+            new_branch: &str,
+            start_point: &str,
+        ) -> Result<PathBuf, KindraError> {
+            self.created.borrow_mut().push((
+                repo_root.to_path_buf(),
+                new_branch.to_string(),
+                start_point.to_string(),
+            ));
+            self.result_path.clone().ok_or(KindraError::MissingPath)
         }
     }
 
@@ -3412,12 +3574,14 @@ mod tests {
     fn activate_filter_selection_switches_or_creates_as_needed() {
         let tmux = StubTmuxClient::default();
         let zoxide = StubZoxideProvider::default().with_match("new session", Path::new("/tmp/new"));
+        let kindra = StubKindraProvider::default();
         let filtered = vec![session_item("alpha")];
 
         assert!(
             activate_filter_selection(
                 &tmux,
                 &zoxide,
+                &kindra,
                 &filtered,
                 0,
                 "ignored",
@@ -3432,6 +3596,7 @@ mod tests {
             activate_filter_selection(
                 &tmux,
                 &zoxide,
+                &kindra,
                 &filtered,
                 0,
                 "new session",
@@ -3450,6 +3615,7 @@ mod tests {
             activate_filter_selection(
                 &tmux,
                 &zoxide,
+                &kindra,
                 &no_matches,
                 0,
                 "new session",
@@ -3465,6 +3631,7 @@ mod tests {
     fn activate_filter_selection_creates_session_for_worktree_rows() {
         let tmux = StubTmuxClient::default();
         let zoxide = StubZoxideProvider::default();
+        let kindra = StubKindraProvider::default();
         let filtered = vec![wisp_core::SessionListItem {
             session_id: "worktree:/tmp/project".to_string(),
             label: "project".to_string(),
@@ -3487,6 +3654,7 @@ mod tests {
             activate_filter_selection(
                 &tmux,
                 &zoxide,
+                &kindra,
                 &filtered,
                 0,
                 "",
@@ -3504,9 +3672,88 @@ mod tests {
     }
 
     #[test]
+    fn activate_filter_selection_creates_kindra_temp_worktree() {
+        let worktree_path = PathBuf::from("/tmp/repo/.git/kindra-worktrees/temp/my-feature");
+        let tmux = StubTmuxClient::default();
+        let zoxide = StubZoxideProvider::default();
+        let kindra = StubKindraProvider::configured_with(&worktree_path);
+        let filtered = vec![wisp_core::SessionListItem {
+            session_id: "kindra-temp:my-feature".to_string(),
+            label: "my-feature".to_string(),
+            kind: wisp_core::SessionListItemKind::CreateTempWorktree,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: Some("new temp worktree from main".to_string()),
+            command_hint: None,
+            git_branch: None,
+            // repo root to run `kin` in, plus the branch name from the query.
+            worktree_path: Some(PathBuf::from("/tmp/repo")),
+            worktree_branch: Some("my-feature".to_string()),
+        }];
+
+        assert!(
+            activate_filter_selection(
+                &tmux,
+                &zoxide,
+                &kindra,
+                &filtered,
+                0,
+                "my-feature",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("temp worktree selection should create the worktree and session")
+        );
+
+        // The worktree is created off the resolved trunk in the repo root.
+        let created_worktrees = kindra.created.borrow();
+        assert_eq!(created_worktrees.len(), 1);
+        assert_eq!(created_worktrees[0].0, PathBuf::from("/tmp/repo"));
+        assert_eq!(created_worktrees[0].1, "my-feature");
+        assert_eq!(created_worktrees[0].2, "main");
+
+        // A session is created in the freshly created worktree path.
+        assert!(tmux.switched_sessions.borrow().is_empty());
+        let created_sessions = tmux.created_sessions.borrow();
+        assert_eq!(created_sessions.len(), 1);
+        assert_eq!(created_sessions[0].0, "my-feature");
+        assert_eq!(created_sessions[0].1, worktree_path);
+    }
+
+    #[test]
+    fn kindra_temp_branch_name_normalizes_and_rejects_invalid_names() {
+        use super::kindra_temp_branch_name;
+
+        // Whitespace collapses to dashes; slashes are preserved.
+        assert_eq!(
+            kindra_temp_branch_name("  my  feature  ").as_deref(),
+            Some("my-feature")
+        );
+        assert_eq!(
+            kindra_temp_branch_name("feature/foo").as_deref(),
+            Some("feature/foo")
+        );
+
+        // Empty or whitespace-only queries yield no row.
+        assert_eq!(kindra_temp_branch_name("   "), None);
+
+        // Names git would reject must not reach the temp-worktree flow.
+        assert_eq!(kindra_temp_branch_name("fix: crash"), None);
+        assert_eq!(kindra_temp_branch_name("foo..bar"), None);
+        assert_eq!(kindra_temp_branch_name("foo.lock"), None);
+        assert_eq!(kindra_temp_branch_name("~weird^"), None);
+    }
+
+    #[test]
     fn activate_filter_selection_creates_session_for_zoxide_row() {
         let tmux = StubTmuxClient::default();
         let zoxide = StubZoxideProvider::default();
+        let kindra = StubKindraProvider::default();
         let filtered = vec![wisp_core::SessionListItem {
             session_id: "zoxide:/path/to/myproject".to_string(),
             label: "myproject".to_string(),
@@ -3530,6 +3777,7 @@ mod tests {
             activate_filter_selection(
                 &tmux,
                 &zoxide,
+                &kindra,
                 &filtered,
                 0,
                 "myproject",
@@ -3550,6 +3798,7 @@ mod tests {
     fn activate_filter_selection_zoxide_row_at_end_of_list() {
         let tmux = StubTmuxClient::default();
         let zoxide = StubZoxideProvider::default();
+        let kindra = StubKindraProvider::default();
         // Simulate filtered list with existing sessions PLUS zoxide at the end
         let filtered = vec![
             wisp_core::SessionListItem {
@@ -3593,6 +3842,7 @@ mod tests {
             activate_filter_selection(
                 &tmux,
                 &zoxide,
+                &kindra,
                 &filtered,
                 1, // selected = 1, pointing to zoxide item
                 "mlm",
@@ -3620,6 +3870,7 @@ mod tests {
             last_activity: None,
         }]);
         let zoxide = StubZoxideProvider::default();
+        let kindra = StubKindraProvider::default();
         let filtered = vec![wisp_core::SessionListItem {
             session_id: "zoxide:/path/to/myproject".to_string(),
             label: "myproject".to_string(),
@@ -3642,6 +3893,7 @@ mod tests {
             activate_filter_selection(
                 &tmux,
                 &zoxide,
+                &kindra,
                 &filtered,
                 0,
                 "myproject",

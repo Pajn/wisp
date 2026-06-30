@@ -4,6 +4,9 @@ set -euo pipefail
 
 readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly CARGO_TOML="${ROOT_DIR}/Cargo.toml"
+# wisp-embers is excluded from the workspace, so it can't inherit
+# version.workspace and must be bumped explicitly during a release.
+readonly EMBERS_CARGO_TOML="${ROOT_DIR}/crates/wisp-embers/Cargo.toml"
 readonly PUBLISH_PACKAGES=(
   wisp-core
   wisp-config
@@ -73,9 +76,43 @@ require_clean_tree() {
   [[ -z "${status}" ]] || die "git tree must be clean before preparing a release"
 }
 
+# Bump the `version = "..."` field inside a TOML section header (e.g.
+# `workspace.package` or `package`), asserting the expected number of matches so
+# a manifest layout change fails the release instead of silently no-op'ing.
+bump_section_version() {
+  local file="$1"
+  local section="$2"
+  local version="$3"
+  local expected_matches="$4"
+
+  python3 - "${file}" "${section}" "${version}" "${expected_matches}" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+section = sys.argv[2]
+version = sys.argv[3]
+expected = int(sys.argv[4])
+text = path.read_text()
+pattern = r'(?ms)^(\[' + re.escape(section) + r'\]\n.*?^version = ")([^"]+)(")$'
+updated, count = re.subn(pattern, rf'\g<1>{version}\3', text, count=1)
+if count != expected:
+    raise SystemExit(
+        f"failed to update [{section}].version in {path} "
+        f"(matched {count}, expected {expected})"
+    )
+path.write_text(updated)
+PY
+}
+
 bump_workspace_versions() {
   local version="$1"
 
+  bump_section_version "${CARGO_TOML}" "workspace.package" "${version}" 1
+
+  # Bump the internal path-dependency requirements (unique to the workspace
+  # manifest, so this stays outside the shared section-version helper).
   python3 - "${CARGO_TOML}" "${version}" <<'PY'
 import pathlib
 import re
@@ -85,24 +122,19 @@ path = pathlib.Path(sys.argv[1])
 version = sys.argv[2]
 text = path.read_text()
 updated, count = re.subn(
-    r'(?ms)^(\[workspace\.package\]\n.*?^version = ")([^"]+)(")$',
-    rf'\g<1>{version}\3',
-    text,
-    count=1,
-)
-if count != 1:
-    raise SystemExit("failed to update workspace.package.version")
-
-updated, count = re.subn(
     r'(?m)^((?:wisp(?:-[a-z]+)?) = \{ version = ")([^"]+)(", path = "crates/[^"]+" \})$',
     rf'\g<1>{version}\3',
-    updated,
+    text,
 )
 if count == 0:
     raise SystemExit("failed to update internal workspace dependency versions")
-
 path.write_text(updated)
 PY
+
+  # The wisp-embers requirement above is bumped to the new version, but the
+  # excluded crate's own [package] version is not part of the workspace, so bump
+  # it here in lockstep or `cargo metadata` fails to resolve the path dependency.
+  bump_section_version "${EMBERS_CARGO_TOML}" "package" "${version}" 1
 }
 
 run_validation() {
@@ -116,6 +148,10 @@ run_validation() {
 refresh_lockfile() {
   echo "+ cargo metadata --format-version 1 >/dev/null"
   (cd "${ROOT_DIR}" && cargo metadata --format-version 1 >/dev/null)
+  # Refresh the excluded crate's own lockfile too so its committed Cargo.lock
+  # reflects the bumped wisp-embers version.
+  echo "+ cargo metadata --manifest-path crates/wisp-embers/Cargo.toml --format-version 1 >/dev/null"
+  (cd "${ROOT_DIR}" && cargo metadata --manifest-path crates/wisp-embers/Cargo.toml --format-version 1 >/dev/null)
 }
 
 tag_to_version() {

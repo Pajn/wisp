@@ -177,6 +177,60 @@ pub fn branch_status_for_directory(path: &Path) -> Option<(GitBranchSync, bool)>
     Some((sync, dirty))
 }
 
+/// Resolves the trunk branch name (e.g. `main` or `master`) for a repository.
+///
+/// Prefers the remote's default branch (`origin/HEAD`), then falls back to a
+/// local `main`/`master`, and finally defaults to `main` so callers always have
+/// a usable start point.
+pub fn trunk_branch(repo_root: &Path) -> String {
+    if let Some(branch) = remote_default_branch(repo_root) {
+        return branch;
+    }
+
+    for candidate in ["main", "master"] {
+        if local_branch_exists(repo_root, candidate) {
+            return candidate.to_string();
+        }
+    }
+
+    "main".to_string()
+}
+
+fn remote_default_branch(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let trimmed = raw.trim();
+    // `origin/main` -> `main`
+    let branch = trimmed.strip_prefix("origin/").unwrap_or(trimmed);
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+fn local_branch_exists(repo_root: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .current_dir(repo_root)
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 /// Gets the git repository root based on the current tmux state.
 /// Finds the current session's focused window path and resolves it to a git repo root.
 pub fn worktree_repo_root(state: &DomainState, client_id: Option<&str>) -> Option<PathBuf> {
