@@ -7,6 +7,7 @@ Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. I
 - tmux session discovery, switching, and attachment, with optional Embers backend support
 - sidebar pane and sidebar popup surfaces in addition to the main picker
 - git worktree-aware picker: see only sessions for the current repo, or browse all worktrees
+- [Kindra](https://github.com/Pajn/kindra) integration: spin up a fresh temporary worktree (branched off trunk) straight from the worktree picker
 - zoxide-backed directory discovery
 - fuzzy filtering and session previews
 - configurable behavior through TOML config plus environment overrides
@@ -19,6 +20,7 @@ Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. I
 - `wisp-tmux`: tmux snapshot/actions backend plus polling fallback
 - `wisp-embers`: optional Embers snapshot/actions adapter and subscription bridge
 - `wisp-zoxide`: zoxide provider and normalization
+- `wisp-kindra`: Kindra (`kin`) temp-worktree detection and creation
 - `wisp-preview`: preview generation and cache
 - `wisp-fuzzy`: matcher abstraction
 - `wisp-ui`: shared ratatui renderers and key translation
@@ -33,6 +35,7 @@ Requirements:
 - `tmux` for tmux-backed flows
 - an Embers checkout at `../embers` only when building with `--features embers`
 - `zoxide` for directory candidates
+- [Kindra](https://github.com/Pajn/kindra) (the `kin` binary) only for the temporary-worktree option in the worktree picker
 - Rust toolchain new enough for edition 2024
 
 Install the CLI:
@@ -83,6 +86,8 @@ WISP_BACKEND=embers WISP_EMBERS_SOCKET=/tmp/embers.sock wisp popup
 Current Embers support covers the main picker, session actions, previews, live refresh, native floating `wisp popup`, floating `wisp sidebar-popup`, and root-split `wisp sidebar-pane`. `wisp statusline ...` remains tmux-only.
 
 Use `--worktree` (or `-w`) to start the picker in worktree mode, which shows only sessions belonging to worktrees of the current repo alongside worktrees that don't yet have sessions.
+
+When the current repo has [Kindra](https://github.com/Pajn/kindra) temporary worktrees configured (a `[worktrees]` section in `kindra.toml` with the `temp` role enabled), worktree mode appends a `＋` row as you type. Your filter text is normalized into a branch slug — whitespace runs become dashes, and text that can't form a valid git branch name hides the row. Selecting it runs `kin wt temp -b <slug> <trunk>` to create a new temporary worktree branched off the repo's trunk, then creates and switches to a session in it. The trunk is resolved from the remote default branch (`origin/HEAD`), falling back to a local `main`/`master`.
 
 Example tmux binding:
 

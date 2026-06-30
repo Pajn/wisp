@@ -29,6 +29,7 @@ wisp-config.workspace = true
 wisp-core.workspace = true
 wisp-embers = { workspace = true, optional = true }
 wisp-fuzzy.workspace = true
+wisp-kindra.workspace = true
 wisp-preview.workspace = true
 wisp-status.workspace = true
 wisp-tmux.workspace = true

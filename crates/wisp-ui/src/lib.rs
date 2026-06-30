@@ -266,7 +266,9 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let marker = if matches!(item.kind, SessionListItemKind::Zoxide) {
+            let marker = if matches!(item.kind, SessionListItemKind::CreateTempWorktree) {
+                "+"
+            } else if matches!(item.kind, SessionListItemKind::Zoxide) {
                 "Z"
             } else if matches!(item.kind, SessionListItemKind::Worktree) {
                 "W"
