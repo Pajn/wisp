@@ -1824,6 +1824,7 @@ dependencies = [
  "wisp-core",
  "wisp-embers",
  "wisp-fuzzy",
+ "wisp-kindra",
  "wisp-preview",
  "wisp-status",
  "wisp-tmux",
@@ -1873,6 +1874,15 @@ dependencies = [
 [[package]]
 name = "wisp-fuzzy"
 version = "0.2.0"
+
+[[package]]
+name = "wisp-kindra"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "toml",
+]
 
 [[package]]
 name = "wisp-preview"
