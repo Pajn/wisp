@@ -5,6 +5,7 @@ members = [
     "crates/wisp-config",
     "crates/wisp-core",
     "crates/wisp-fuzzy",
+    "crates/wisp-kindra",
     "crates/wisp-preview", "crates/wisp-status",
     "crates/wisp-tmux",
     "crates/wisp-ui",
@@ -44,6 +45,7 @@ wisp-config = { version = "0.2.0", path = "crates/wisp-config" }
 wisp-core = { version = "0.2.0", path = "crates/wisp-core" }
 wisp-embers = { version = "0.2.0", path = "crates/wisp-embers" }
 wisp-fuzzy = { version = "0.2.0", path = "crates/wisp-fuzzy" }
+wisp-kindra = { version = "0.2.0", path = "crates/wisp-kindra" }
 wisp-preview = { version = "0.2.0", path = "crates/wisp-preview" }
 wisp-status = { version = "0.2.0", path = "crates/wisp-status" }
 wisp-tmux = { version = "0.2.0", path = "crates/wisp-tmux" }
