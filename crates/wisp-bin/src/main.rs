@@ -1545,6 +1545,23 @@ fn run_surface(
     // recompute it when the repo root under the cursor changes.
     let mut last_kindra_repo_root: Option<Option<PathBuf>> = None;
     let mut kindra_temp_context: Option<KindraTempContext> = None;
+    // When a user-triggered action fails recoverably, its message is shown in a
+    // dismissable popup instead of tearing down the picker. Cleared on next key.
+    let mut error: Option<String> = None;
+
+    // Report a fallible action's failure via the error popup and return to the
+    // event loop, rather than propagating (which would exit the whole picker).
+    macro_rules! report_err {
+        ($result:expr) => {
+            match $result {
+                Ok(value) => value,
+                Err(err) => {
+                    error = Some(err.to_string());
+                    continue;
+                }
+            }
+        };
+    }
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -1794,6 +1811,7 @@ fn run_surface(
             kind: surface_kind,
             bindings: bindings.clone(),
             mode: picker_mode,
+            error: error.clone(),
         };
 
         terminal.draw(|frame| {
@@ -1872,8 +1890,15 @@ fn run_surface(
 
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key) = event::read()?
-            && let Some(intent) = translate_key(key, &bindings)
         {
+            // An open error popup is modal: any key dismisses it, including keys
+            // translate_key does not map to an intent. Check before translating.
+            if error.take().is_some() {
+                continue;
+            }
+            let Some(intent) = translate_key(key, &bindings) else {
+                continue;
+            };
             match intent {
                 UiIntent::SelectNext => {
                     if matches!(input_mode, InputMode::Filter) && !filtered.is_empty() {
@@ -1970,7 +1995,7 @@ fn run_surface(
                             )?;
                         }
                         let activated = match backend {
-                            RuntimeBackend::Tmux => activate_filter_selection(
+                            RuntimeBackend::Tmux => report_err!(activate_filter_selection(
                                 &tmux,
                                 &zoxide,
                                 &kindra,
@@ -1979,18 +2004,20 @@ fn run_surface(
                                 &query,
                                 &current_directory,
                                 matches!(activate_intent, UiIntent::CreateSessionFromQuery),
-                            )?,
+                            )),
                             #[cfg(feature = "embers")]
-                            RuntimeBackend::Embers(client) => activate_filter_selection(
-                                Arc::clone(client),
-                                &zoxide,
-                                &kindra,
-                                &filtered,
-                                selected,
-                                &query,
-                                &current_directory,
-                                matches!(activate_intent, UiIntent::CreateSessionFromQuery),
-                            )?,
+                            RuntimeBackend::Embers(client) => {
+                                report_err!(activate_filter_selection(
+                                    Arc::clone(client),
+                                    &zoxide,
+                                    &kindra,
+                                    &filtered,
+                                    selected,
+                                    &query,
+                                    &current_directory,
+                                    matches!(activate_intent, UiIntent::CreateSessionFromQuery),
+                                ))
+                            }
                         };
                         if activated {
                             match (sidebar_runtime.as_mut(), backend) {
@@ -2064,10 +2091,12 @@ fn run_surface(
                         }
 
                         match backend {
-                            RuntimeBackend::Tmux => tmux.rename_session(&session_id, &new_name)?,
+                            RuntimeBackend::Tmux => {
+                                report_err!(tmux.rename_session(&session_id, &new_name))
+                            }
                             #[cfg(feature = "embers")]
                             RuntimeBackend::Embers(client) => {
-                                client.rename_session(&session_id, &new_name)?
+                                report_err!(client.rename_session(&session_id, &new_name))
                             }
                         }
                         let reloaded_state = load_domain_state(backend)?;
@@ -2108,9 +2137,18 @@ fn run_surface(
                         let repo_root = repo_root.clone();
                         let filter_query = filter_query.clone();
 
-                        // Never forces: a dirty worktree makes kin fail and the
-                        // error propagates rather than discarding uncommitted work.
-                        kindra.remove_temp_worktree(&repo_root, &branch)?;
+                        // Never forces: a dirty worktree makes kin fail. On
+                        // failure, surface the error and return to the filter
+                        // view (preserving the query/selection) instead of
+                        // discarding uncommitted work or tearing down the picker.
+                        if let Err(err) = kindra.remove_temp_worktree(&repo_root, &branch) {
+                            error = Some(err.to_string());
+                            query = filter_query;
+                            input_mode = InputMode::Filter;
+                            preview_session_id = None;
+                            preview_refreshed_at = None;
+                            continue;
+                        }
 
                         let reloaded_state = load_domain_state(backend)?;
                         apply_reloaded_state(
@@ -2160,10 +2198,12 @@ fn run_surface(
                             | wisp_core::SessionListItemKind::WorktreeSession => {
                                 let session_id = item.session_id.clone();
                                 match backend {
-                                    RuntimeBackend::Tmux => tmux.kill_session(&session_id)?,
+                                    RuntimeBackend::Tmux => {
+                                        report_err!(tmux.kill_session(&session_id))
+                                    }
                                     #[cfg(feature = "embers")]
                                     RuntimeBackend::Embers(client) => {
-                                        client.kill_session(&session_id)?
+                                        report_err!(client.kill_session(&session_id))
                                     }
                                 }
                                 let reloaded_state = load_domain_state(backend)?;
