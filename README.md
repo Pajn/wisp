@@ -89,6 +89,8 @@ Use `--worktree` (or `-w`) to start the picker in worktree mode, which shows onl
 
 When the current repo has [Kindra](https://github.com/Pajn/kindra) temporary worktrees configured (a `[worktrees]` section in `kindra.toml` with the `temp` role enabled), worktree mode appends a `＋` row as you type. Your filter text is normalized into a branch slug — whitespace runs become dashes, and text that can't form a valid git branch name hides the row. Selecting it runs `kin wt temp -b <slug> <trunk>` to create a new temporary worktree branched off the repo's trunk, then creates and switches to a session in it. The trunk is resolved from the remote default branch (`origin/HEAD`), falling back to a local `main`/`master`.
 
+To remove a temporary worktree, first close its session (the close-session key), which leaves a session-less worktree row. Pressing close again on that row — when it is a Kindra temp worktree — prompts for confirmation and then runs `kin wt remove` to delete the worktree. Deletion never forces, so a worktree with uncommitted changes is left intact and Kindra reports the error.
+
 Example tmux binding:
 
 Add this to `~/.tmux.conf` to open Wisp with `prefix + o`:
