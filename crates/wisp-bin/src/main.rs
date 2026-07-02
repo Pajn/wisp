@@ -346,6 +346,13 @@ enum InputMode {
         session_id: String,
         filter_query: String,
     },
+    /// Confirming deletion of a Kindra temporary worktree that no longer has a
+    /// session. `filter_query` restores the prior filter when the prompt closes.
+    ConfirmDeleteWorktree {
+        branch: String,
+        repo_root: PathBuf,
+        filter_query: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1114,6 +1121,29 @@ fn is_valid_git_branch_name(name: &str) -> bool {
     })
 }
 
+/// Resolves the delete target when the close action lands on a worktree row.
+///
+/// Returns the branch and the repo root to run `kin` in only when the row is a
+/// session-less worktree whose branch is a Kindra-managed temp worktree; any
+/// other row (regular git worktree, main/review, no configured temp support)
+/// yields `None` so the close action stays a no-op there.
+fn kindra_delete_target(
+    kindra: &impl KindraProvider,
+    context: Option<&KindraTempContext>,
+    item: &SessionListItem,
+) -> Option<(String, PathBuf)> {
+    let context = context?;
+    if item.kind != wisp_core::SessionListItemKind::Worktree {
+        return None;
+    }
+    let branch = item.worktree_branch.as_ref()?;
+    kindra
+        .temp_worktree_branches(&context.repo_root)
+        .iter()
+        .any(|candidate| candidate == branch)
+        .then(|| (branch.clone(), context.repo_root.clone()))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn activate_filter_selection(
     launcher: impl SessionLauncher,
@@ -1603,7 +1633,9 @@ fn run_surface(
 
         let mut filtered = match input_mode {
             InputMode::Filter => filter_items(&session_items, &query),
-            InputMode::Rename { .. } => session_items.clone(),
+            InputMode::Rename { .. } | InputMode::ConfirmDeleteWorktree { .. } => {
+                session_items.clone()
+            }
         };
         if matches!(input_mode, InputMode::Filter)
             && !query.trim().is_empty()
@@ -1747,6 +1779,9 @@ fn run_surface(
         let model = SurfaceModel {
             title: match (&surface_kind, &input_mode) {
                 (SurfaceKind::Picker, InputMode::Rename { .. }) => "Rename Session".to_string(),
+                (SurfaceKind::Picker, InputMode::ConfirmDeleteWorktree { branch, .. }) => {
+                    format!("Delete temp worktree '{branch}'?  [Enter] confirm  [Esc] cancel")
+                }
                 (SurfaceKind::Picker, InputMode::Filter) => "Wisp Picker".to_string(),
                 (SurfaceKind::SidebarCompact, _) => "Wisp Sidebar".to_string(),
                 (SurfaceKind::SidebarExpanded, _) => "Wisp Sidebar+".to_string(),
@@ -1851,15 +1886,21 @@ fn run_surface(
                     }
                 }
                 UiIntent::FilterChanged(fragment) => {
-                    query.push_str(&fragment);
-                    if matches!(input_mode, InputMode::Filter) {
-                        selected = 0;
+                    // The confirm prompt takes no text input; leave the stored
+                    // filter untouched so it can be restored on cancel.
+                    if !matches!(input_mode, InputMode::ConfirmDeleteWorktree { .. }) {
+                        query.push_str(&fragment);
+                        if matches!(input_mode, InputMode::Filter) {
+                            selected = 0;
+                        }
                     }
                 }
                 UiIntent::Backspace => {
-                    query.pop();
-                    if matches!(input_mode, InputMode::Filter) {
-                        selected = 0;
+                    if !matches!(input_mode, InputMode::ConfirmDeleteWorktree { .. }) {
+                        query.pop();
+                        if matches!(input_mode, InputMode::Filter) {
+                            selected = 0;
+                        }
                     }
                 }
                 UiIntent::ToggleCompactSidebar => {
@@ -2058,6 +2099,39 @@ fn run_surface(
                             runtime.rename_session(new_name);
                         }
                     }
+                    InputMode::ConfirmDeleteWorktree {
+                        branch,
+                        repo_root,
+                        filter_query,
+                    } => {
+                        let branch = branch.clone();
+                        let repo_root = repo_root.clone();
+                        let filter_query = filter_query.clone();
+
+                        // Never forces: a dirty worktree makes kin fail and the
+                        // error propagates rather than discarding uncommitted work.
+                        kindra.remove_temp_worktree(&repo_root, &branch)?;
+
+                        let reloaded_state = load_domain_state(backend)?;
+                        apply_reloaded_state(
+                            reloaded_state,
+                            picker_mode,
+                            session_sort,
+                            &mut active_client_id,
+                            &mut session_items,
+                            &mut pending_branch_names,
+                            &mut branch_status_updates,
+                            &mut details_preview_provider,
+                            &mut deferred_branch_status,
+                        );
+                        query = filter_query;
+                        input_mode = InputMode::Filter;
+                        preview_session_id = None;
+                        preview_refreshed_at = None;
+                        if preview_enabled {
+                            preview = Some(Vec::new());
+                        }
+                    }
                 },
                 UiIntent::RenameSession => {
                     if matches!(input_mode, InputMode::Filter)
@@ -2080,34 +2154,54 @@ fn run_surface(
                 UiIntent::CloseSession => {
                     if matches!(input_mode, InputMode::Filter)
                         && let Some(item) = filtered.get(selected)
-                        && matches!(
-                            item.kind,
-                            wisp_core::SessionListItemKind::Session
-                                | wisp_core::SessionListItemKind::WorktreeSession
-                        )
                     {
-                        let session_id = item.session_id.clone();
-                        match backend {
-                            RuntimeBackend::Tmux => tmux.kill_session(&session_id)?,
-                            #[cfg(feature = "embers")]
-                            RuntimeBackend::Embers(client) => client.kill_session(&session_id)?,
-                        }
-                        let reloaded_state = load_domain_state(backend)?;
-                        apply_reloaded_state(
-                            reloaded_state,
-                            picker_mode,
-                            session_sort,
-                            &mut active_client_id,
-                            &mut session_items,
-                            &mut pending_branch_names,
-                            &mut branch_status_updates,
-                            &mut details_preview_provider,
-                            &mut deferred_branch_status,
-                        );
-                        preview_session_id = None;
-                        preview_refreshed_at = None;
-                        if preview_enabled {
-                            preview = Some(Vec::new());
+                        match item.kind {
+                            wisp_core::SessionListItemKind::Session
+                            | wisp_core::SessionListItemKind::WorktreeSession => {
+                                let session_id = item.session_id.clone();
+                                match backend {
+                                    RuntimeBackend::Tmux => tmux.kill_session(&session_id)?,
+                                    #[cfg(feature = "embers")]
+                                    RuntimeBackend::Embers(client) => {
+                                        client.kill_session(&session_id)?
+                                    }
+                                }
+                                let reloaded_state = load_domain_state(backend)?;
+                                apply_reloaded_state(
+                                    reloaded_state,
+                                    picker_mode,
+                                    session_sort,
+                                    &mut active_client_id,
+                                    &mut session_items,
+                                    &mut pending_branch_names,
+                                    &mut branch_status_updates,
+                                    &mut details_preview_provider,
+                                    &mut deferred_branch_status,
+                                );
+                                preview_session_id = None;
+                                preview_refreshed_at = None;
+                                if preview_enabled {
+                                    preview = Some(Vec::new());
+                                }
+                            }
+                            // A worktree row with no session: if it's a Kindra temp
+                            // worktree, closing it offers to delete the worktree.
+                            wisp_core::SessionListItemKind::Worktree => {
+                                if let Some((branch, repo_root)) = kindra_delete_target(
+                                    &kindra,
+                                    kindra_temp_context.as_ref(),
+                                    item,
+                                ) {
+                                    input_mode = InputMode::ConfirmDeleteWorktree {
+                                        branch,
+                                        repo_root,
+                                        filter_query: query.clone(),
+                                    };
+                                    preview_session_id = None;
+                                    preview_refreshed_at = None;
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -2136,7 +2230,8 @@ fn run_surface(
                         }
                         break Ok(());
                     }
-                    InputMode::Rename { filter_query, .. } => {
+                    InputMode::Rename { filter_query, .. }
+                    | InputMode::ConfirmDeleteWorktree { filter_query, .. } => {
                         query = filter_query.clone();
                         input_mode = InputMode::Filter;
                         preview_session_id = None;
@@ -3172,6 +3267,8 @@ mod tests {
         configured: bool,
         created: RefCell<Vec<(PathBuf, String, String)>>,
         result_path: Option<PathBuf>,
+        temp_branches: Vec<String>,
+        removed: RefCell<Vec<(PathBuf, String)>>,
     }
 
     impl StubKindraProvider {
@@ -3180,7 +3277,15 @@ mod tests {
                 configured: true,
                 created: RefCell::new(Vec::new()),
                 result_path: Some(path.to_path_buf()),
+                temp_branches: Vec::new(),
+                removed: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_temp_branches(mut self, branches: &[&str]) -> Self {
+            self.configured = true;
+            self.temp_branches = branches.iter().map(|b| (*b).to_string()).collect();
+            self
         }
     }
 
@@ -3201,6 +3306,17 @@ mod tests {
                 start_point.to_string(),
             ));
             self.result_path.clone().ok_or(KindraError::MissingPath)
+        }
+
+        fn temp_worktree_branches(&self, _repo_root: &Path) -> Vec<String> {
+            self.temp_branches.clone()
+        }
+
+        fn remove_temp_worktree(&self, repo_root: &Path, branch: &str) -> Result<(), KindraError> {
+            self.removed
+                .borrow_mut()
+                .push((repo_root.to_path_buf(), branch.to_string()));
+            Ok(())
         }
     }
 
@@ -3757,6 +3873,59 @@ mod tests {
         assert_eq!(kindra_temp_branch_name("foo..bar"), None);
         assert_eq!(kindra_temp_branch_name("foo.lock"), None);
         assert_eq!(kindra_temp_branch_name("~weird^"), None);
+    }
+
+    #[test]
+    fn kindra_delete_target_matches_only_temp_worktree_rows() {
+        use super::{KindraTempContext, kindra_delete_target};
+
+        let worktree_row = |branch: &str, kind| wisp_core::SessionListItem {
+            session_id: format!("worktree:/repo/{branch}"),
+            label: branch.to_string(),
+            kind,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: None,
+            command_hint: None,
+            git_branch: None,
+            worktree_path: Some(PathBuf::from(format!("/repo/{branch}"))),
+            worktree_branch: Some(branch.to_string()),
+        };
+
+        let context = KindraTempContext {
+            repo_root: PathBuf::from("/repo"),
+            trunk: "main".to_string(),
+        };
+        let kindra = StubKindraProvider::default().with_temp_branches(&["feature/spike"]);
+
+        // A session-less worktree row whose branch is a temp worktree is deletable.
+        let temp_row = worktree_row("feature/spike", wisp_core::SessionListItemKind::Worktree);
+        assert_eq!(
+            kindra_delete_target(&kindra, Some(&context), &temp_row),
+            Some(("feature/spike".to_string(), PathBuf::from("/repo")))
+        );
+
+        // A worktree that Kindra does not track as temp is not deletable.
+        let other = worktree_row("release/1.0", wisp_core::SessionListItemKind::Worktree);
+        assert_eq!(kindra_delete_target(&kindra, Some(&context), &other), None);
+
+        // Without configured temp support (no context), nothing is deletable.
+        assert_eq!(kindra_delete_target(&kindra, None, &temp_row), None);
+
+        // A row that still has a session is closed as a session, not deleted.
+        let session_row = worktree_row(
+            "feature/spike",
+            wisp_core::SessionListItemKind::WorktreeSession,
+        );
+        assert_eq!(
+            kindra_delete_target(&kindra, Some(&context), &session_row),
+            None
+        );
     }
 
     #[test]

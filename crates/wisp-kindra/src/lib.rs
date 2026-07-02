@@ -27,6 +27,14 @@ pub trait KindraProvider {
         new_branch: &str,
         start_point: &str,
     ) -> Result<PathBuf, KindraError>;
+
+    /// Returns the branch names of all Kindra-managed *temporary* worktrees for
+    /// the repository rooted at `repo_root`.
+    fn temp_worktree_branches(&self, repo_root: &Path) -> Vec<String>;
+
+    /// Removes the temporary worktree for `branch`. Never passes `--force`, so a
+    /// worktree with uncommitted changes is left in place and surfaces an error.
+    fn remove_temp_worktree(&self, repo_root: &Path, branch: &str) -> Result<(), KindraError>;
 }
 
 /// Drives Kindra through the `kin` command-line binary.
@@ -121,9 +129,59 @@ impl KindraProvider for CommandKindraProvider {
             start_point.to_string(),
         ];
 
+        let output = self.run_kin(repo_root, &args)?;
+        parse_worktree_path(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn temp_worktree_branches(&self, repo_root: &Path) -> Vec<String> {
+        let Some(common_dir) = self.git_common_dir(repo_root) else {
+            return Vec::new();
+        };
+        temp_worktree_branches_in(&common_dir.join("kindra_worktrees.json"))
+    }
+
+    fn remove_temp_worktree(&self, repo_root: &Path, branch: &str) -> Result<(), KindraError> {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            return Err(KindraError::InvalidBranch {
+                branch: branch.to_string(),
+            });
+        }
+
+        // `branch:<name>` targets the temp worktree for that branch (never main
+        // or review). `--yes` skips kin's own prompt since we confirm in the UI.
+        let args = vec![
+            "wt".to_string(),
+            "remove".to_string(),
+            format!("branch:{branch}"),
+            "--yes".to_string(),
+        ];
+
+        self.run_kin(repo_root, &args)?;
+        Ok(())
+    }
+}
+
+impl CommandKindraProvider {
+    fn command_for_args(&self, args: &[String]) -> Vec<String> {
+        std::iter::once(self.binary.display().to_string())
+            .chain(args.iter().cloned())
+            .collect()
+    }
+
+    /// Runs `kin` with `args` in `repo_root`, returning the completed output only
+    /// when the process both spawned and exited successfully. Spawn failures map
+    /// to [`KindraError::Unavailable`] (missing binary) or
+    /// [`KindraError::SpawnFailed`]; a non-zero exit maps to
+    /// [`KindraError::CommandFailed`] with the process's real stderr.
+    fn run_kin(
+        &self,
+        repo_root: &Path,
+        args: &[String],
+    ) -> Result<std::process::Output, KindraError> {
         let output = Command::new(&self.binary)
             .current_dir(repo_root)
-            .args(&args)
+            .args(args)
             .output()
             .map_err(|source| {
                 if source.kind() == std::io::ErrorKind::NotFound {
@@ -134,7 +192,7 @@ impl KindraProvider for CommandKindraProvider {
                     // The process never ran, so there is no command stderr here;
                     // CommandFailed is reserved for real execution failures below.
                     KindraError::SpawnFailed {
-                        command: self.command_for_args(&args),
+                        command: self.command_for_args(args),
                         message: source.to_string(),
                     }
                 }
@@ -142,21 +200,13 @@ impl KindraProvider for CommandKindraProvider {
 
         if !output.status.success() {
             return Err(KindraError::CommandFailed {
-                command: self.command_for_args(&args),
+                command: self.command_for_args(args),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
                 status: output.status.code(),
             });
         }
 
-        parse_worktree_path(&String::from_utf8_lossy(&output.stdout))
-    }
-}
-
-impl CommandKindraProvider {
-    fn command_for_args(&self, args: &[String]) -> Vec<String> {
-        std::iter::once(self.binary.display().to_string())
-            .chain(args.iter().cloned())
-            .collect()
+        Ok(output)
     }
 }
 
@@ -218,6 +268,38 @@ pub fn temp_worktrees_configured_in(config_path: &Path) -> bool {
     }
 }
 
+/// Subset of Kindra's `kindra_worktrees.json` metadata Wisp needs to identify
+/// temp worktrees. Unknown keys (path, timestamps) are ignored.
+#[derive(Debug, Default, Deserialize)]
+struct WorktreeMetadataFile {
+    #[serde(default)]
+    worktrees: Vec<ManagedWorktreeRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManagedWorktreeRecord {
+    role: String,
+    branch: String,
+}
+
+/// Returns the branch names of temp worktrees recorded in the metadata file at
+/// `metadata_path`. Missing or unparseable metadata yields an empty list.
+#[must_use]
+pub fn temp_worktree_branches_in(metadata_path: &Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(metadata_path) else {
+        return Vec::new();
+    };
+    let Ok(metadata) = serde_json::from_str::<WorktreeMetadataFile>(&raw) else {
+        return Vec::new();
+    };
+    metadata
+        .worktrees
+        .into_iter()
+        .filter(|record| record.role == "temp")
+        .map(|record| record.branch)
+        .collect()
+}
+
 /// Extracts the worktree path Kindra prints on stdout after creating a worktree.
 ///
 /// `kin wt temp` prints the resulting worktree path on its own line; we use the
@@ -235,12 +317,46 @@ fn parse_worktree_path(stdout: &str) -> Result<PathBuf, KindraError> {
 mod tests {
     use std::fs;
 
-    use super::{parse_worktree_path, temp_worktrees_configured_in};
+    use super::{parse_worktree_path, temp_worktree_branches_in, temp_worktrees_configured_in};
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("wisp-kindra-{}-{name}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    #[test]
+    fn lists_only_temp_worktree_branches_from_metadata() {
+        let dir = temp_dir("metadata");
+        let path = dir.join("kindra_worktrees.json");
+        fs::write(
+            &path,
+            r#"{
+              "version": 1,
+              "worktrees": [
+                {"role": "main", "branch": "main", "path": "p1", "created_at": 1, "last_used_at": 1},
+                {"role": "temp", "branch": "feature/spike", "path": "p2", "created_at": 1, "last_used_at": 1},
+                {"role": "temp", "branch": "hotfix", "path": "p3", "created_at": 1, "last_used_at": 1}
+              ]
+            }"#,
+        )
+        .expect("write metadata");
+
+        let mut branches = temp_worktree_branches_in(&path);
+        branches.sort();
+        assert_eq!(
+            branches,
+            vec!["feature/spike".to_string(), "hotfix".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_metadata_yields_no_temp_branches() {
+        let dir = temp_dir("metadata-missing");
+        assert!(temp_worktree_branches_in(&dir.join("kindra_worktrees.json")).is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
