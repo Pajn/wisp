@@ -5,7 +5,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap},
 };
 use wisp_core::{GitBranchStatus, GitBranchSync, PickerMode, SessionListItem, SessionListItemKind};
 
@@ -27,6 +27,8 @@ pub struct SurfaceModel {
     pub kind: SurfaceKind,
     pub bindings: KeyBindings,
     pub mode: PickerMode,
+    /// When set, a dismissable error popup is drawn on top of the surface.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +98,87 @@ pub fn render_surface(area: Rect, buffer: &mut Buffer, model: &SurfaceModel) {
         SurfaceKind::SidebarCompact | SurfaceKind::SidebarExpanded => {
             render_sidebar(area, buffer, model)
         }
+    }
+
+    if let Some(error) = &model.error {
+        render_error_popup(area, buffer, error);
+    }
+}
+
+/// Draws a centered, dismissable error popup over the surface.
+fn render_error_popup(area: Rect, buffer: &mut Buffer, message: &str) {
+    let message_len = message.chars().count() as u16;
+    let max_width = area.width.saturating_sub(4);
+    let width = (message_len + 4).min(60).min(max_width).max(1);
+    let inner_width = width.saturating_sub(2).max(1);
+    // Size the body with the same word-based wrapping `Paragraph` applies, then
+    // reserve a blank spacer and the dismiss hint below it. Borders add 2.
+    let message_lines = wrapped_line_count(message, inner_width);
+    let height = (message_lines + 1 + 1 + 2).min(area.height).max(3);
+    let popup = centered_rect(width, height, area);
+
+    let block = Block::default()
+        .title("Error")
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(Color::Red));
+    let inner = block.inner(popup);
+    Clear.render(popup, buffer);
+    block.render(popup, buffer);
+
+    // Split so the hint always occupies its own bottom row and can never be
+    // clipped by the wrapped message above it.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    Paragraph::new(Line::from(Span::styled(
+        message.to_string(),
+        Style::default().fg(Color::Red),
+    )))
+    .wrap(Wrap { trim: true })
+    .render(rows[0], buffer);
+    Paragraph::new(Line::from(Span::styled(
+        "press any key to dismiss",
+        Style::default().add_modifier(Modifier::DIM),
+    )))
+    .render(rows[1], buffer);
+}
+
+/// Counts the rows `text` occupies when word-wrapped to `width` columns, matching
+/// ratatui's `Wrap { trim: true }`: greedy word packing, with words longer than
+/// the width broken across rows.
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    let mut lines: u16 = 1;
+    let mut col = 0usize;
+    for word in text.split_whitespace() {
+        let mut word_len = word.chars().count();
+        if col != 0 {
+            if col + 1 + word_len <= width {
+                col += 1 + word_len;
+                continue;
+            }
+            lines += 1;
+        }
+        // Place the word at the start of a line, breaking it if it overflows.
+        while word_len > width {
+            lines += 1;
+            word_len -= width;
+        }
+        col = word_len;
+    }
+    lines
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     }
 }
 
@@ -714,7 +797,7 @@ mod tests {
 
     use crate::{
         KeyBindings, SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface,
-        sanitize_ansi_input, translate_key,
+        sanitize_ansi_input, translate_key, wrapped_line_count,
     };
 
     fn item(label: &str) -> SessionListItem {
@@ -750,6 +833,7 @@ mod tests {
             kind: SurfaceKind::Picker,
             bindings: KeyBindings::default(),
             mode: PickerMode::AllSessions,
+            error: None,
         };
 
         render_surface(buffer.area, &mut buffer, &model);
@@ -762,6 +846,103 @@ mod tests {
         assert!(rendered.contains("Wisp Picker"));
         assert!(rendered.contains("Preview"));
         assert!(rendered.contains("alpha"));
+    }
+
+    #[test]
+    fn renders_error_popup_over_picker_when_set() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 14));
+        let model = SurfaceModel {
+            title: "Wisp Picker".to_string(),
+            query: String::new(),
+            items: vec![item("alpha")],
+            selected: 0,
+            show_help: true,
+            preview: None,
+            kind: SurfaceKind::Picker,
+            bindings: KeyBindings::default(),
+            mode: PickerMode::AllSessions,
+            error: Some("kin wt remove failed: dirty worktree".to_string()),
+        };
+
+        render_surface(buffer.area, &mut buffer, &model);
+
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Error"));
+        assert!(rendered.contains("dirty worktree"));
+        assert!(rendered.contains("press any key to dismiss"));
+    }
+
+    #[test]
+    fn wrapped_line_count_matches_word_wrapping() {
+        // Fits on one line.
+        assert_eq!(wrapped_line_count("hello world", 20), 1);
+        // Greedy word packing wraps to a second line ("hello world" = 11 cols).
+        assert_eq!(wrapped_line_count("hello world", 8), 2);
+        // A word longer than the width is broken across rows (10 chars / 4 = 3).
+        assert_eq!(wrapped_line_count("abcdefghij", 4), 3);
+        // Empty input still occupies one row.
+        assert_eq!(wrapped_line_count("", 10), 1);
+    }
+
+    #[test]
+    fn error_popup_keeps_dismiss_hint_visible_for_long_messages() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 20));
+        let long = "kin wt remove failed: the temporary worktree has uncommitted \
+                    changes and cannot be removed without discarding them"
+            .to_string();
+        let model = SurfaceModel {
+            title: "Wisp Picker".to_string(),
+            query: String::new(),
+            items: vec![item("alpha")],
+            selected: 0,
+            show_help: true,
+            preview: None,
+            kind: SurfaceKind::Picker,
+            bindings: KeyBindings::default(),
+            mode: PickerMode::AllSessions,
+            error: Some(long),
+        };
+
+        render_surface(buffer.area, &mut buffer, &model);
+
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        // The wrapped message and the reserved hint row are both visible.
+        assert!(rendered.contains("uncommitted"));
+        assert!(rendered.contains("press any key to dismiss"));
+    }
+
+    #[test]
+    fn omits_error_popup_when_unset() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 14));
+        let model = SurfaceModel {
+            title: "Wisp Picker".to_string(),
+            query: String::new(),
+            items: vec![item("alpha")],
+            selected: 0,
+            show_help: true,
+            preview: None,
+            kind: SurfaceKind::Picker,
+            bindings: KeyBindings::default(),
+            mode: PickerMode::AllSessions,
+            error: None,
+        };
+
+        render_surface(buffer.area, &mut buffer, &model);
+
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains("press any key to dismiss"));
     }
 
     #[test]
@@ -796,6 +977,7 @@ mod tests {
             kind: SurfaceKind::SidebarCompact,
             bindings: KeyBindings::default(),
             mode: PickerMode::AllSessions,
+            error: None,
         };
 
         render_surface(buffer.area, &mut buffer, &model);
@@ -838,6 +1020,7 @@ mod tests {
             kind: SurfaceKind::SidebarExpanded,
             bindings: KeyBindings::default(),
             mode: PickerMode::Worktree,
+            error: None,
         };
 
         render_surface(buffer.area, &mut buffer, &model);
