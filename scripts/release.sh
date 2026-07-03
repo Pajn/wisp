@@ -194,15 +194,38 @@ resolve_tag() {
   echo "${tag}"
 }
 
+# Map a crate name to its crates.io sparse-index path. We query the sparse
+# index (https://index.crates.io) rather than the web API because the API is
+# gated behind crates.io's data-access policy, which rejects generic clients
+# (curl's default User-Agent included) with an error body and never serves the
+# version data — the previous API-based poll always timed out as a result. The
+# sparse index is the registry surface built for tooling and cargo itself uses.
+crate_index_path() {
+  local name="$1"
+  case "${#name}" in
+    1) printf '1/%s' "${name}" ;;
+    2) printf '2/%s' "${name}" ;;
+    3) printf '3/%s/%s' "${name:0:1}" "${name}" ;;
+    *) printf '%s/%s/%s' "${name:0:2}" "${name:2:2}" "${name}" ;;
+  esac
+}
+
+# True if the given version already appears in the crate's sparse-index entry.
+crate_version_published() {
+  local package="$1"
+  local version="$2"
+  local body
+  body="$(curl --silent --location "https://index.crates.io/$(crate_index_path "${package}")" || true)"
+  [[ -n "${body}" ]] && grep -q "\"vers\":\"${version}\"" <<<"${body}"
+}
+
 wait_for_crate_version() {
   local package="$1"
   local version="$2"
   local attempt
-  local body
 
   for attempt in $(seq 1 24); do
-    body="$(curl --silent --show-error --location "https://crates.io/api/v1/crates/${package}" || true)"
-    if [[ -n "${body}" ]] && grep -q "\"num\":\"${version}\"" <<<"${body}"; then
+    if crate_version_published "${package}" "${version}"; then
       return 0
     fi
 
@@ -220,6 +243,15 @@ publish_packages() {
 
   local -a target_args
   for package in "${PUBLISH_PACKAGES[@]}"; do
+    # Skip crates already at this version so a rerun after a partial release
+    # (crates.io publishes are permanent and can't be re-uploaded) resumes with
+    # the crates that still need publishing instead of failing on the first one
+    # that already landed.
+    if crate_version_published "${package}" "${version}"; then
+      echo "skipping ${package} ${version} (already on crates.io)"
+      continue
+    fi
+
     echo "publishing ${package} ${version}"
     # wisp-embers lives outside the workspace, so it is addressed by its own
     # manifest path rather than `--package` from the workspace root.
