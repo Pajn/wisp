@@ -7,12 +7,20 @@ readonly CARGO_TOML="${ROOT_DIR}/Cargo.toml"
 # wisp-embers is excluded from the workspace, so it can't inherit
 # version.workspace and must be bumped explicitly during a release.
 readonly EMBERS_CARGO_TOML="${ROOT_DIR}/crates/wisp-embers/Cargo.toml"
+# Publish order is a topological sort of the internal dependency graph: every
+# crate appears after the wisp-* crates it depends on, so each `cargo publish`
+# resolves its dependencies against versions already live on crates.io.
+# wisp-embers is excluded from the workspace but is an (optional) dependency of
+# wisp-app and wisp, and wisp-kindra is a leaf dependency of wisp — both must be
+# published or the crates that depend on them cannot be.
 readonly PUBLISH_PACKAGES=(
   wisp-core
   wisp-config
   wisp-fuzzy
+  wisp-kindra
   wisp-tmux
   wisp-zoxide
+  wisp-embers
   wisp-status
   wisp-ui
   wisp-preview
@@ -210,9 +218,17 @@ publish_packages() {
   local package
   [[ -n "${CARGO_REGISTRY_TOKEN:-}" ]] || die "CARGO_REGISTRY_TOKEN must be set for publishing"
 
+  local -a target_args
   for package in "${PUBLISH_PACKAGES[@]}"; do
     echo "publishing ${package} ${version}"
-    if ! run_cmd cargo publish --package "${package}" --locked; then
+    # wisp-embers lives outside the workspace, so it is addressed by its own
+    # manifest path rather than `--package` from the workspace root.
+    if [[ "${package}" == "wisp-embers" ]]; then
+      target_args=(--manifest-path "${EMBERS_CARGO_TOML}")
+    else
+      target_args=(--package "${package}")
+    fi
+    if ! run_cmd cargo publish "${target_args[@]}" --locked; then
       cat >&2 <<EOF
 publish failed for ${package} ${version}
 
@@ -230,12 +246,26 @@ EOF
 
 preflight_packages() {
   local version="$1"
-  local package
 
-  for package in "${PUBLISH_PACKAGES[@]}"; do
-    echo "preflighting ${package} ${version}"
-    run_cmd cargo package --package "${package}" --locked --no-verify
-  done
+  # Package every workspace member in one invocation so internal path
+  # dependencies resolve against the local crates being released rather than
+  # crates.io. Packaging a crate individually (the previous approach) fails for
+  # any crate that depends on a bumped-but-not-yet-published sibling, because
+  # `cargo package` resolves each dependency's version requirement against the
+  # registry, where the new version does not exist yet.
+  #
+  # wisp-app and the wisp binary are excluded here: their optional wisp-embers
+  # dependency lives outside the workspace, so cargo cannot substitute a local
+  # copy and the requirement can't resolve until wisp-embers is published. They
+  # are validated during the ordered publish instead, once wisp-embers and their
+  # other dependencies are live on crates.io.
+  echo "preflighting workspace crates ${version}"
+  run_cmd cargo package --workspace --exclude wisp-app --exclude wisp --locked --no-verify
+
+  # wisp-embers is excluded from the workspace, so preflight it via its own
+  # manifest.
+  echo "preflighting wisp-embers ${version}"
+  run_cmd cargo package --manifest-path "${EMBERS_CARGO_TOML}" --locked --no-verify
 }
 
 cmd_prepare() {
