@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "wisp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argh",
  "crossterm",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wisp-config",
  "wisp-core",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_ignored",
@@ -1855,14 +1855,14 @@ dependencies = [
 
 [[package]]
 name = "wisp-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "wisp-embers"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "embers-client",
  "embers-core",
@@ -1873,11 +1873,11 @@ dependencies = [
 
 [[package]]
 name = "wisp-fuzzy"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "wisp-kindra"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-preview"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
  "wisp-core",
@@ -1896,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-status"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "wisp-core",
@@ -1904,14 +1904,14 @@ dependencies = [
 
 [[package]]
 name = "wisp-tmux"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "wisp-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-zoxide"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
 ]
