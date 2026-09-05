@@ -54,6 +54,7 @@ const PREVIEW_REFRESH_DEBOUNCE: Duration = Duration::from_millis(400);
 const DEFAULT_CLIENT_ID: &str = "default";
 const SIDEBAR_PANE_TITLE: &str = "Wisp Sidebar";
 const SIDEBAR_PANE_WIDTH: u16 = 36;
+const ZOXIDE_PICKER_MAX_RESULTS: usize = 5;
 #[cfg(feature = "embers")]
 const EMBERS_SURFACE_ENV: &str = "WISP_EMBERS_SURFACE";
 #[cfg(feature = "embers")]
@@ -1538,8 +1539,6 @@ fn run_surface(
     let mut picker_mode = mode;
     let mut first_frame = true;
     let mut deferred_branch_status = BTreeMap::new();
-    let mut last_zoxide_query: String = String::new();
-    let mut last_zoxide_match: Option<wisp_zoxide::DirectoryEntry> = None;
     // Cache of the worktree-mode repo root we last probed for Kindra temp-worktree
     // support, plus the resolved trunk. Detection shells out to git/kin, so we only
     // recompute it when the repo root under the cursor changes.
@@ -1658,40 +1657,11 @@ fn run_surface(
             && !query.trim().is_empty()
             && picker_mode == PickerMode::AllSessions
         {
-            let query_trimmed = query.trim();
-            if query_trimmed != last_zoxide_query.trim() {
-                last_zoxide_query = query_trimmed.to_string();
-                last_zoxide_match = zoxide.query_directory(&query).ok().flatten();
-            }
-            if let Some(zoxide_match) = &last_zoxide_match {
-                let path_display = zoxide_match.path.display().to_string();
-                let basename = zoxide_match
-                    .path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                filtered.push(SessionListItem {
-                    session_id: format!("zoxide:{}", zoxide_match.path.display()),
-                    label: basename,
-                    kind: wisp_core::SessionListItemKind::Zoxide,
-                    is_current: false,
-                    is_previous: false,
-                    last_activity: None,
-                    attached: false,
-                    attention: wisp_core::AttentionBadge::None,
-                    attention_count: 0,
-                    active_window_label: None,
-                    path_hint: Some(path_display),
-                    command_hint: None,
-                    git_branch: None,
-                    worktree_path: Some(zoxide_match.path.clone()),
-                    worktree_branch: None,
-                });
-            }
-        } else if query.trim().is_empty() {
-            last_zoxide_query.clear();
-            last_zoxide_match = None;
+            filtered.extend(zoxide_items_for_query(
+                &zoxide_entries,
+                &query,
+                ZOXIDE_PICKER_MAX_RESULTS,
+            ));
         }
         if matches!(input_mode, InputMode::Filter) && picker_mode == PickerMode::Worktree {
             let repo_root = git::worktree_repo_root(
@@ -3043,6 +3013,50 @@ fn filter_items(items: &[SessionListItem], query: &str) -> Vec<SessionListItem> 
         .collect()
 }
 
+fn zoxide_items_for_query(
+    entries: &[wisp_zoxide::DirectoryEntry],
+    query: &str,
+    max_results: usize,
+) -> Vec<SessionListItem> {
+    if query.trim().is_empty() || max_results == 0 {
+        return Vec::new();
+    }
+
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let path_display = entry.path.display().to_string();
+            SessionListItem {
+                session_id: format!("zoxide:{path_display}"),
+                label: entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                kind: wisp_core::SessionListItemKind::Zoxide,
+                is_current: false,
+                is_previous: false,
+                last_activity: None,
+                attached: false,
+                attention: wisp_core::AttentionBadge::None,
+                attention_count: 0,
+                active_window_label: None,
+                path_hint: Some(path_display),
+                command_hint: None,
+                git_branch: None,
+                worktree_path: Some(entry.path.clone()),
+                worktree_branch: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    filter_items(&items, query)
+        .into_iter()
+        .take(max_results)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3072,7 +3086,7 @@ mod tests {
         reconcile_sidebar_for_current_context, selected_index_for_session,
         sidebar_requires_handoff, sidebar_state_path, sidebar_surface_command,
         statusline_command_expression, statusline_mode, uninstall_statusline_refresh_hooks,
-        validate_statusline_flags,
+        validate_statusline_flags, zoxide_items_for_query,
     };
 
     #[derive(Default)]
@@ -4315,6 +4329,39 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].session_id, "alpha");
+    }
+
+    #[test]
+    fn zoxide_picker_results_match_paths_and_are_capped() {
+        let entries = (0..7)
+            .map(|index| DirectoryEntry {
+                path: PathBuf::from(format!("/tmp/project-{index}")),
+                score: Some(f64::from(10 - index)),
+                exists: true,
+            })
+            .collect::<Vec<_>>();
+
+        let results = zoxide_items_for_query(&entries, "project", 5);
+
+        assert_eq!(results.len(), 5);
+        assert!(results.iter().all(|item| {
+            item.kind == wisp_core::SessionListItemKind::Zoxide
+                && item
+                    .path_hint
+                    .as_deref()
+                    .is_some_and(|path| path.contains("project"))
+        }));
+    }
+
+    #[test]
+    fn zoxide_picker_results_are_hidden_without_a_query() {
+        let entries = vec![DirectoryEntry {
+            path: PathBuf::from("/tmp/project"),
+            score: Some(10.0),
+            exists: true,
+        }];
+
+        assert!(zoxide_items_for_query(&entries, "  ", 5).is_empty());
     }
 
     #[test]
