@@ -314,7 +314,7 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
             .items
             .iter()
             .filter_map(|item| item.git_branch.as_ref())
-            .map(|branch| branch.name.chars().count())
+            .map(|branch| terminal_width(&branch.name))
             .max()
             .unwrap_or(0)
             .min(18)
@@ -329,7 +329,7 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
         let max_session_width = model
             .items
             .iter()
-            .map(|item| item.label.chars().count())
+            .map(|item| terminal_width(&item.label))
             .max()
             .unwrap_or(0)
             .min(28);
@@ -394,6 +394,19 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
                     .as_deref()
                     .or(item.path_hint.as_deref())
                     .unwrap_or_default();
+                let extra_branch_width = item
+                    .git_branch
+                    .as_ref()
+                    .map(|branch| {
+                        let unused_title_width =
+                            title_width.saturating_sub(terminal_width(title_source));
+                        let branch_overflow =
+                            terminal_width(&branch.name).saturating_sub(branch_width);
+                        unused_title_width.min(branch_overflow)
+                    })
+                    .unwrap_or(0);
+                let title_width = title_width.saturating_sub(extra_branch_width);
+                let row_branch_width = branch_width + extra_branch_width;
                 let title = pad_text(&truncate_text(title_source, title_width), title_width);
                 let prefix = if branch_width == 0 {
                     format!("{icon} {session}  {title}")
@@ -405,7 +418,10 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
                 if branch_width > 0 {
                     if let Some(branch) = item.git_branch.as_ref() {
                         spans.push(Span::styled(
-                            pad_left(&truncate_left(&branch.name, branch_width), branch_width),
+                            pad_left(
+                                &truncate_left(&branch.name, row_branch_width),
+                                row_branch_width,
+                            ),
                             style.patch(branch_style(branch)),
                         ));
                         spans.push(Span::styled(
@@ -544,7 +560,7 @@ fn intent_label(intent: &UiIntent) -> &'static str {
 }
 
 fn pad_text(value: &str, width: usize) -> String {
-    let len = value.chars().count();
+    let len = terminal_width(value);
     if len >= width {
         value.to_string()
     } else {
@@ -553,7 +569,7 @@ fn pad_text(value: &str, width: usize) -> String {
 }
 
 fn pad_left(value: &str, width: usize) -> String {
-    let len = value.chars().count();
+    let len = terminal_width(value);
     if len >= width {
         value.to_string()
     } else {
@@ -565,33 +581,46 @@ fn truncate_text(value: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let chars = value.chars().collect::<Vec<_>>();
-    if chars.len() <= width {
+    if terminal_width(value) <= width {
         return value.to_string();
     }
-    if width == 1 {
+    let ellipsis = "…";
+    let content_width = width.saturating_sub(terminal_width(ellipsis));
+    if content_width == 0 {
         return "…".to_string();
     }
-    chars[..width - 1].iter().collect::<String>() + "…"
+
+    let end = value
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+        .rfind(|&end| terminal_width(&value[..end]) <= content_width)
+        .unwrap_or(0);
+    format!("{}{ellipsis}", &value[..end])
 }
 
 fn truncate_left(value: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let chars = value.chars().collect::<Vec<_>>();
-    if chars.len() <= width {
+    if terminal_width(value) <= width {
         return value.to_string();
     }
-    if width == 1 {
+    let ellipsis = "…";
+    let content_width = width.saturating_sub(terminal_width(ellipsis));
+    if content_width == 0 {
         return "…".to_string();
     }
-    format!(
-        "…{}",
-        chars[chars.len() - (width - 1)..]
-            .iter()
-            .collect::<String>()
-    )
+
+    let start = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|&start| terminal_width(&value[start..]) <= content_width)
+        .unwrap_or(value.len());
+    format!("{ellipsis}{}", &value[start..])
+}
+
+fn terminal_width(value: &str) -> usize {
+    Span::raw(value).width()
 }
 
 fn branch_style(branch: &GitBranchStatus) -> Style {
@@ -793,7 +822,10 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
-    use wisp_core::{AttentionBadge, PickerMode, SessionListItem, SessionListItemKind};
+    use wisp_core::{
+        AttentionBadge, GitBranchStatus, GitBranchSync, PickerMode, SessionListItem,
+        SessionListItemKind,
+    };
 
     use crate::{
         KeyBindings, SurfaceKind, SurfaceModel, UiIntent, ansi_preview_text, render_surface,
@@ -846,6 +878,73 @@ mod tests {
         assert!(rendered.contains("Wisp Picker"));
         assert!(rendered.contains("Preview"));
         assert!(rendered.contains("alpha"));
+    }
+
+    #[test]
+    fn picker_branch_uses_unused_title_column_width() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 10));
+        let mut branch_item = item("alpha");
+        branch_item.active_window_label = Some("sh".to_string());
+        branch_item.git_branch = Some(GitBranchStatus {
+            name: "feature/let-branches-use-empty-title-space".to_string(),
+            sync: GitBranchSync::Pushed,
+            dirty: false,
+        });
+        let model = SurfaceModel {
+            title: "Wisp Picker".to_string(),
+            query: String::new(),
+            items: vec![branch_item],
+            selected: 0,
+            show_help: false,
+            preview: None,
+            kind: SurfaceKind::Picker,
+            bindings: KeyBindings::default(),
+            mode: PickerMode::AllSessions,
+            error: None,
+        };
+
+        render_surface(buffer.area, &mut buffer, &model);
+
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("feature/let-branches-use-empty-title-space"));
+    }
+
+    #[test]
+    fn picker_wide_title_does_not_lend_occupied_cells_to_long_branch() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 50, 10));
+        let mut branch_item = item("alpha");
+        branch_item.active_window_label = Some("界界界界界界界".to_string());
+        branch_item.git_branch = Some(GitBranchStatus {
+            name: "abcdefghijklmnopqrstuvwxyz".to_string(),
+            sync: GitBranchSync::Pushed,
+            dirty: false,
+        });
+        let model = SurfaceModel {
+            title: "Wisp Picker".to_string(),
+            query: String::new(),
+            items: vec![branch_item],
+            selected: 0,
+            show_help: false,
+            preview: None,
+            kind: SurfaceKind::Picker,
+            bindings: KeyBindings::default(),
+            mode: PickerMode::AllSessions,
+            error: None,
+        };
+
+        render_surface(buffer.area, &mut buffer, &model);
+
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("…jklmnopqrstuvwxyz"));
+        assert!(!rendered.contains("abcdefghijklmnopqrstuvwxyz"));
     }
 
     #[test]
