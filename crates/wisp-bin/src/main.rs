@@ -1373,13 +1373,9 @@ fn open_popup_or_run_inline(
                 &embers_surface_env(client, false)?,
             )?;
             create_embers_floating_for_buffer(
-                client,
-                &buffer_id,
-                Some(surface_title(kind)),
-                width,
-                height,
-                true,
-                true,
+                client, &buffer_id,
+                // No frame title: the surface draws its own, as in a tmux popup.
+                None, width, height, true, true,
             )?;
             Ok(())
         }
@@ -1435,7 +1431,8 @@ fn open_sidebar_popup_or_run_inline(
             create_embers_floating_for_buffer(
                 client,
                 &buffer_id,
-                Some(surface_title(SurfaceKind::SidebarCompact)),
+                // No frame title: the surface draws its own, as in a tmux popup.
+                None,
                 resolve_dimension_to_cells(&Dimension::Percent(35), viewport_cols),
                 resolve_dimension_to_cells(&Dimension::Percent(85), viewport_rows),
                 true,
