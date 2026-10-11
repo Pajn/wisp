@@ -145,3 +145,14 @@ cargo test -p wisp --test smoke
 cargo bench -p wisp-core --bench projections --no-run
 cargo bench -p wisp-status --bench formatting --no-run
 ```
+
+## Releasing
+
+Releases are cut from `main` with [cargo-release](https://github.com/crate-ci/cargo-release), configured in `release.toml`:
+
+```bash
+cargo release minor            # dry run: shows the version bump, commit, and tag
+cargo release minor --execute  # bumps every crate, commits, tags vX.Y.Z, and pushes
+```
+
+Pushing the tag starts the Release workflow, which publishes the crates to crates.io, creates the GitHub release, and uploads the binaries. Nothing is published from the local machine. The Prepare Release workflow does the same bump from GitHub Actions when given a version.
