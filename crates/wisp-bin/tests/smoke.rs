@@ -116,12 +116,12 @@ fn doctor_reports_embers_when_selected_without_a_socket() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("backend: embers"));
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     {
         assert!(stdout.contains("socket not configured"));
         assert!(stdout.contains("event strategy: SubscriptionStream"));
     }
-    #[cfg(not(feature = "embers"))]
+    #[cfg(not(embers))]
     {
         assert!(stdout.contains("support not compiled in"));
         assert!(stdout.contains("event strategy: Disabled"));

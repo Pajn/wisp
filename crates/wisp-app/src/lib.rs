@@ -7,7 +7,7 @@ use wisp_core::{
     WindowRecord, deduplicate_candidates, derive_candidates, preview_request_for_candidate,
     resolve_action, sort_candidates,
 };
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 use wisp_embers::{EmbersPane, EmbersSnapshot};
 use wisp_tmux::TmuxSnapshot;
 use wisp_zoxide::DirectoryEntry;
@@ -113,7 +113,7 @@ impl Default for CandidateBuildOptions {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendSnapshot {
     Tmux(TmuxSnapshot),
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     Embers(EmbersSnapshot),
 }
 
@@ -301,7 +301,7 @@ pub fn rebuild_candidates(
 pub fn build_domain_state(sources: &CandidateSources) -> DomainState {
     let (sessions, clients, previous_session_by_client) = match &sources.backend {
         BackendSnapshot::Tmux(snapshot) => build_tmux_state(snapshot),
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         BackendSnapshot::Embers(snapshot) => build_embers_state(snapshot),
     };
     let directories = sources
@@ -418,7 +418,7 @@ fn build_tmux_state(
     (sessions, clients, Default::default())
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn build_embers_state(
     snapshot: &EmbersSnapshot,
 ) -> (
@@ -551,7 +551,7 @@ mod tests {
     use wisp_core::{
         AttentionBadge, Candidate, DirectoryMetadata, PreviewContent, PreviewKey, SessionMetadata,
     };
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     use wisp_embers::{
         EmbersActivityState, EmbersContext, EmbersPane, EmbersSession, EmbersSnapshot, EmbersWindow,
     };
@@ -829,7 +829,7 @@ mod tests {
         assert!(candidates.is_empty());
     }
 
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     #[test]
     fn build_domain_state_projects_embers_tabs_and_panes() {
         let state = build_domain_state(&CandidateSources {

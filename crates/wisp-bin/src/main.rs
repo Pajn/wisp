@@ -21,7 +21,7 @@ use crossterm::{
 use ratatui::widgets::Clear;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use wisp_app::{BackendSnapshot, CandidateSources, build_domain_state};
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 use wisp_config::Dimension;
 use wisp_config::{
     BackendKind, CliOverrides, KeyAction, LoadOptions, ResolvedConfig, SessionSortMode, load_config,
@@ -32,7 +32,7 @@ use wisp_core::{
     derive_session_list_with_worktrees, derive_status_items, sanitize_session_name,
     sort_session_list_items,
 };
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 use wisp_embers::{EmbersClient, EmbersJoinPlacement};
 use wisp_fuzzy::{MatchItem, Matcher, SimpleMatcher};
 use wisp_kindra::{CommandKindraProvider, KindraProvider};
@@ -55,9 +55,9 @@ const DEFAULT_CLIENT_ID: &str = "default";
 const SIDEBAR_PANE_TITLE: &str = "Wisp Sidebar";
 const SIDEBAR_PANE_WIDTH: u16 = 36;
 const ZOXIDE_PICKER_MAX_RESULTS: usize = 5;
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 const EMBERS_SURFACE_ENV: &str = "WISP_EMBERS_SURFACE";
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 const EMBERS_SIDEBAR_PANE_SURFACE: &str = "sidebar-pane";
 const STATUSLINE_REFRESH_HOOKS: &[&str] = &[
     "client-session-changed[200]",
@@ -130,17 +130,17 @@ impl Drop for TerminalTeardown {
 #[derive(Clone)]
 enum RuntimeBackend {
     Tmux,
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     Embers(Arc<EmbersClient>),
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 struct EmbersPanePreviewProvider {
     embers: Arc<EmbersClient>,
     max_lines: usize,
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 impl EmbersPanePreviewProvider {
     fn new(embers: Arc<EmbersClient>) -> Self {
         Self {
@@ -150,7 +150,7 @@ impl EmbersPanePreviewProvider {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 impl PreviewProvider for EmbersPanePreviewProvider {
     fn can_preview(&self, request: &PreviewRequest) -> bool {
         matches!(request, PreviewRequest::SessionSummary { .. })
@@ -178,12 +178,12 @@ impl PreviewProvider for EmbersPanePreviewProvider {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 impl RuntimeBackend {
     fn poll_updates(&self) -> Result<bool, Box<dyn Error>> {
         match self {
             Self::Tmux => Ok(false),
-            #[cfg(feature = "embers")]
+            #[cfg(embers)]
             Self::Embers(client) => client.poll_updates().map_err(|error| error.into()),
         }
     }
@@ -389,7 +389,7 @@ enum SidebarTarget {
         home_window_index: u32,
         pane_id: Option<String>,
     },
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     Embers { buffer_id: String },
 }
 
@@ -401,12 +401,12 @@ impl SidebarRuntime {
     fn tmux_pane_id(&self) -> Option<&str> {
         match &self.target {
             SidebarTarget::Tmux { pane_id, .. } => pane_id.as_deref(),
-            #[cfg(feature = "embers")]
+            #[cfg(embers)]
             SidebarTarget::Embers { .. } => None,
         }
     }
 
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     fn embers_buffer_id(&self) -> Option<&str> {
         match &self.target {
             SidebarTarget::Tmux { .. } => None,
@@ -586,7 +586,7 @@ fn selected_backend_kind(config: &ResolvedConfig) -> BackendKind {
             // Mirror load_runtime_backend: a socket hint only resolves to Embers
             // if it actually connects, otherwise Auto falls back to tmux. This
             // keeps the doctor/statusline view consistent with the real runtime.
-            #[cfg(feature = "embers")]
+            #[cfg(embers)]
             if let Some(socket_path) = resolve_embers_socket_path(config)
                 && EmbersClient::connect(socket_path).is_ok()
             {
@@ -598,7 +598,7 @@ fn selected_backend_kind(config: &ResolvedConfig) -> BackendKind {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn resolve_embers_socket_path(config: &ResolvedConfig) -> Option<PathBuf> {
     config
         .embers
@@ -610,7 +610,7 @@ fn resolve_embers_socket_path(config: &ResolvedConfig) -> Option<PathBuf> {
 fn load_runtime_backend(config: &ResolvedConfig) -> Result<RuntimeBackend, Box<dyn Error>> {
     match config.backend.kind {
         BackendKind::Tmux => Ok(RuntimeBackend::Tmux),
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         BackendKind::Embers => {
             let socket_path = resolve_embers_socket_path(config).ok_or_else(|| {
                 "embers backend selected, but no socket path was configured".to_string()
@@ -619,9 +619,9 @@ fn load_runtime_backend(config: &ResolvedConfig) -> Result<RuntimeBackend, Box<d
                 socket_path,
             )?)))
         }
-        #[cfg(not(feature = "embers"))]
+        #[cfg(not(embers))]
         BackendKind::Embers => Err(embers_feature_disabled()),
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         BackendKind::Auto => match resolve_embers_socket_path(config) {
             // In Auto mode a configured/leftover socket path is a hint, not a
             // commitment: if the embers server is unreachable (e.g. a stale
@@ -638,14 +638,14 @@ fn load_runtime_backend(config: &ResolvedConfig) -> Result<RuntimeBackend, Box<d
             },
             None => Ok(RuntimeBackend::Tmux),
         },
-        #[cfg(not(feature = "embers"))]
+        #[cfg(not(embers))]
         BackendKind::Auto => Ok(RuntimeBackend::Tmux),
     }
 }
 
-#[cfg(not(feature = "embers"))]
+#[cfg(not(embers))]
 fn embers_feature_disabled() -> Box<dyn Error> {
-    "embers backend support was not compiled in; rebuild with `--features embers`".into()
+    "embers backend support was not compiled in; it needs a Unix target and the default `embers` feature".into()
 }
 
 fn embers_unsupported(feature: &str) -> Box<dyn Error> {
@@ -687,7 +687,7 @@ fn doctor() -> Result<(), Box<dyn Error>> {
     match backend_kind {
         BackendKind::Tmux => {}
         BackendKind::Embers => {
-            #[cfg(feature = "embers")]
+            #[cfg(embers)]
             match resolve_embers_socket_path(&config) {
                 // Actually probe the socket rather than trusting that a path is
                 // configured: the server may be down or the socket stale.
@@ -699,7 +699,7 @@ fn doctor() -> Result<(), Box<dyn Error>> {
                 },
                 None => println!("embers: socket not configured"),
             }
-            #[cfg(not(feature = "embers"))]
+            #[cfg(not(embers))]
             println!("embers: support not compiled in");
         }
         BackendKind::Auto => unreachable!("auto backend should resolve before doctor output"),
@@ -714,9 +714,9 @@ fn doctor() -> Result<(), Box<dyn Error>> {
         "event strategy: {}",
         match backend_kind {
             BackendKind::Tmux => "PollingFallback",
-            #[cfg(feature = "embers")]
+            #[cfg(embers)]
             BackendKind::Embers => "SubscriptionStream",
-            #[cfg(not(feature = "embers"))]
+            #[cfg(not(embers))]
             BackendKind::Embers => "Disabled",
             BackendKind::Auto => unreachable!("auto backend should resolve before doctor output"),
         }
@@ -933,7 +933,7 @@ impl<T: TmuxClient> SessionLauncher for &T {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 impl SessionLauncher for Arc<EmbersClient> {
     fn create_or_switch(&self, name: &str, directory: &Path) -> Result<(), Box<dyn Error>> {
         self.create_or_switch_session(name, directory)?;
@@ -1216,7 +1216,7 @@ fn activate_filter_selection(
     Ok(false)
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn surface_command_args(kind: SurfaceKind, mode: PickerMode) -> Vec<String> {
     match kind {
         SurfaceKind::Picker => vec![
@@ -1231,7 +1231,7 @@ fn surface_command_args(kind: SurfaceKind, mode: PickerMode) -> Vec<String> {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn surface_title(kind: SurfaceKind) -> &'static str {
     match kind {
         SurfaceKind::Picker => "Wisp Picker",
@@ -1239,7 +1239,7 @@ fn surface_title(kind: SurfaceKind) -> &'static str {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn embers_sidebar_env(persistent: bool) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     if persistent {
@@ -1251,7 +1251,7 @@ fn embers_sidebar_env(persistent: bool) -> BTreeMap<String, String> {
     env
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn resolve_dimension_to_cells(dimension: &Dimension, max: u16) -> u16 {
     match dimension {
         Dimension::Percent(percent) => {
@@ -1261,7 +1261,7 @@ fn resolve_dimension_to_cells(dimension: &Dimension, max: u16) -> u16 {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn create_embers_floating_for_buffer(
     client: &EmbersClient,
     buffer_id: &str,
@@ -1287,7 +1287,7 @@ fn create_embers_floating_for_buffer(
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn join_embers_buffer_to_current_session_root(
     client: &EmbersClient,
     buffer_id: &str,
@@ -1334,7 +1334,7 @@ fn open_popup_or_run_inline(
                 Err(error) => Err(Box::new(error)),
             }
         }
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         RuntimeBackend::Embers(client) => {
             let (viewport_cols, viewport_rows) = client
                 .current_session_viewport_size()?
@@ -1394,7 +1394,7 @@ fn open_sidebar_popup_or_run_inline(
                 Err(error) => Err(Box::new(error)),
             }
         }
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         RuntimeBackend::Embers(client) => {
             let (viewport_cols, viewport_rows) =
                 client.current_session_viewport_size()?.ok_or_else(|| {
@@ -1434,7 +1434,7 @@ fn open_sidebar_pane(backend: &RuntimeBackend) -> Result<(), Box<dyn Error>> {
             )?;
             Ok(())
         }
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         RuntimeBackend::Embers(client) => {
             let command =
                 surface_command_args(SurfaceKind::SidebarCompact, PickerMode::AllSessions);
@@ -1476,7 +1476,7 @@ fn run_surface(
             session_sort,
         );
     let mut pane_preview_provider = ActivePanePreviewProvider::new(CommandTmuxClient::new());
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     let mut embers_preview_provider = match backend {
         RuntimeBackend::Tmux => None,
         RuntimeBackend::Embers(client) => Some(EmbersPanePreviewProvider::new(client.clone())),
@@ -1492,7 +1492,7 @@ fn run_surface(
     let sidebar_command = sidebar_surface_command(env::current_exe()?);
     let mut sidebar_runtime = match backend {
         RuntimeBackend::Tmux => tmux_sidebar_runtime(&tmux, kind)?,
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         RuntimeBackend::Embers(client) => embers_sidebar_runtime(client, kind)?,
     };
     let saved_sidebar_state = match &sidebar_runtime {
@@ -1569,13 +1569,13 @@ fn run_surface(
 
     let result = loop {
         pane_preview_provider.max_lines = preview_line_budget(&terminal, show_help)?;
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         if let Some(provider) = embers_preview_provider.as_mut() {
             provider.max_lines = preview_line_budget(&terminal, show_help)?;
         }
 
         if let Some(runtime) = &mut sidebar_runtime {
-            #[cfg(feature = "embers")]
+            #[cfg(embers)]
             let requires_handoff = sidebar_requires_handoff(
                 &tmux,
                 match backend {
@@ -1584,7 +1584,7 @@ fn run_surface(
                 },
                 runtime,
             )?;
-            #[cfg(not(feature = "embers"))]
+            #[cfg(not(embers))]
             let requires_handoff = sidebar_requires_handoff(&tmux, runtime)?;
 
             if !requires_handoff {
@@ -1607,7 +1607,7 @@ fn run_surface(
                         )?;
                         break Ok(());
                     }
-                    #[cfg(feature = "embers")]
+                    #[cfg(embers)]
                     (SidebarTarget::Embers { buffer_id }, RuntimeBackend::Embers(client)) => {
                         let new_session_name = client.join_buffer_to_current_session_root(
                             buffer_id,
@@ -1641,7 +1641,7 @@ fn run_surface(
                         }
                         continue;
                     }
-                    #[cfg(feature = "embers")]
+                    #[cfg(embers)]
                     _ => {}
                 }
             }
@@ -1737,13 +1737,13 @@ fn run_surface(
             preview_refreshed_at = None;
         } else if should_refresh_preview && let Some(item) = selected_item {
             let session_preview_provider: &dyn PreviewProvider = match preview_mode {
-                #[cfg(feature = "embers")]
+                #[cfg(embers)]
                 PreviewMode::Pane => match (&embers_preview_provider, backend) {
                     (_, RuntimeBackend::Tmux) => &pane_preview_provider,
                     (Some(provider), RuntimeBackend::Embers(_)) => provider,
                     (None, RuntimeBackend::Embers(_)) => &details_preview_provider,
                 },
-                #[cfg(not(feature = "embers"))]
+                #[cfg(not(embers))]
                 PreviewMode::Pane => &pane_preview_provider,
                 PreviewMode::Details => &details_preview_provider,
             };
@@ -1825,7 +1825,7 @@ fn run_surface(
             continue;
         }
 
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         if matches!(backend, RuntimeBackend::Embers(_)) && backend.poll_updates()? {
             let selected_session_id = filtered.get(selected).map(|item| item.session_id.clone());
             let reloaded_state = load_domain_state_with_zoxide(backend, zoxide_entries.clone())?;
@@ -1975,7 +1975,7 @@ fn run_surface(
                                 &current_directory,
                                 matches!(activate_intent, UiIntent::CreateSessionFromQuery),
                             )),
-                            #[cfg(feature = "embers")]
+                            #[cfg(embers)]
                             RuntimeBackend::Embers(client) => {
                                 report_err!(activate_filter_selection(
                                     Arc::clone(client),
@@ -1999,7 +1999,7 @@ fn run_surface(
                                     )?;
                                     break Ok(());
                                 }
-                                #[cfg(feature = "embers")]
+                                #[cfg(embers)]
                                 (Some(runtime), RuntimeBackend::Embers(client))
                                     if runtime.embers_buffer_id().is_some() =>
                                 {
@@ -2064,7 +2064,7 @@ fn run_surface(
                             RuntimeBackend::Tmux => {
                                 report_err!(tmux.rename_session(&session_id, &new_name))
                             }
-                            #[cfg(feature = "embers")]
+                            #[cfg(embers)]
                             RuntimeBackend::Embers(client) => {
                                 report_err!(client.rename_session(&session_id, &new_name))
                             }
@@ -2171,7 +2171,7 @@ fn run_surface(
                                     RuntimeBackend::Tmux => {
                                         report_err!(tmux.kill_session(&session_id))
                                     }
-                                    #[cfg(feature = "embers")]
+                                    #[cfg(embers)]
                                     RuntimeBackend::Embers(client) => {
                                         report_err!(client.kill_session(&session_id))
                                     }
@@ -2226,14 +2226,14 @@ fn run_surface(
                                         pane_id.as_deref(),
                                     )?;
                                 }
-                                #[cfg(feature = "embers")]
+                                #[cfg(embers)]
                                 (
                                     SidebarTarget::Embers { buffer_id },
                                     RuntimeBackend::Embers(client),
                                 ) => {
                                     client.detach_buffer(buffer_id)?;
                                 }
-                                #[cfg(feature = "embers")]
+                                #[cfg(embers)]
                                 _ => {}
                             }
                             clear_sidebar_ui_state(runtime.session_name())?;
@@ -2449,7 +2449,7 @@ fn tmux_sidebar_runtime(
     }))
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn embers_sidebar_runtime(
     embers: &EmbersClient,
     kind: SurfaceKind,
@@ -2476,7 +2476,7 @@ fn embers_sidebar_runtime(
 
 fn sidebar_requires_handoff(
     tmux: &impl TmuxClient,
-    #[cfg(feature = "embers")] embers: Option<&EmbersClient>,
+    #[cfg(embers)] embers: Option<&EmbersClient>,
     runtime: &SidebarRuntime,
 ) -> Result<bool, Box<dyn Error>> {
     match &runtime.target {
@@ -2489,7 +2489,7 @@ fn sidebar_requires_handoff(
                     || context.window_index != Some(*home_window_index),
             )
         }
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         SidebarTarget::Embers { .. } => {
             let Some(embers) = embers else {
                 return Ok(false);
@@ -2733,7 +2733,7 @@ fn load_domain_state_with_zoxide(
             let backend = PollingTmuxBackend::new(CommandTmuxClient::new());
             BackendSnapshot::Tmux(backend.snapshot()?)
         }
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         RuntimeBackend::Embers(client) => BackendSnapshot::Embers(client.snapshot()?),
     };
     let client_id = snapshot_client_id(&snapshot);
@@ -2747,7 +2747,7 @@ fn load_domain_state_with_zoxide(
 fn snapshot_client_id(snapshot: &BackendSnapshot) -> String {
     match snapshot {
         BackendSnapshot::Tmux(_) => DEFAULT_CLIENT_ID.to_string(),
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         BackendSnapshot::Embers(snapshot) => snapshot
             .context
             .client_id
@@ -2756,7 +2756,7 @@ fn snapshot_client_id(snapshot: &BackendSnapshot) -> String {
     }
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 type SidebarReload = (
     DomainState,
     Vec<SessionListItem>,
@@ -2764,7 +2764,7 @@ type SidebarReload = (
     mpsc::Receiver<GitStatusUpdate>,
 );
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 struct SidebarReloadContext<'a> {
     config: &'a ResolvedConfig,
     backend: &'a RuntimeBackend,
@@ -2777,7 +2777,7 @@ struct SidebarReloadContext<'a> {
     surface_kind: &'a mut SurfaceKind,
 }
 
-#[cfg(feature = "embers")]
+#[cfg(embers)]
 fn reload_sidebar_runtime_state(
     context: SidebarReloadContext<'_>,
 ) -> Result<SidebarReload, Box<dyn Error>> {
@@ -3573,13 +3573,13 @@ mod tests {
             },
         };
 
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         let handoff = sidebar_requires_handoff(&tmux, None, &runtime);
-        #[cfg(not(feature = "embers"))]
+        #[cfg(not(embers))]
         let handoff = sidebar_requires_handoff(&tmux, &runtime);
         assert!(handoff.expect("handoff should evaluate"));
 
-        #[cfg(feature = "embers")]
+        #[cfg(embers)]
         let stable_handoff = sidebar_requires_handoff(
             &StubTmuxClient::default().with_context(TmuxContext {
                 session_name: Some("alpha".to_string()),
@@ -3589,7 +3589,7 @@ mod tests {
             None,
             &runtime,
         );
-        #[cfg(not(feature = "embers"))]
+        #[cfg(not(embers))]
         let stable_handoff = sidebar_requires_handoff(
             &StubTmuxClient::default().with_context(TmuxContext {
                 session_name: Some("alpha".to_string()),
@@ -4297,7 +4297,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "embers")]
+    #[cfg(embers)]
     #[test]
     fn snapshot_client_id_uses_embers_snapshot_client() {
         let snapshot = wisp_app::BackendSnapshot::Embers(wisp_embers::EmbersSnapshot {

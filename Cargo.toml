@@ -4,15 +4,16 @@ members = [
     "crates/wisp-bin",
     "crates/wisp-config",
     "crates/wisp-core",
+    "crates/wisp-embers",
     "crates/wisp-fuzzy",
     "crates/wisp-kindra",
-    "crates/wisp-preview", "crates/wisp-status",
+    "crates/wisp-preview",
+    "crates/wisp-status",
     "crates/wisp-tmux",
     "crates/wisp-ui",
     "crates/wisp-zoxide",
 ]
 resolver = "3"
-exclude = ["crates/wisp-embers"]
 
 [workspace.package]
 version = "0.3.0"

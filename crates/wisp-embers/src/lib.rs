@@ -352,7 +352,7 @@ impl EmbersClient {
         env: &BTreeMap<String, String>,
     ) -> Result<String, EmbersError> {
         self.with_state(|runtime, state| {
-            let buffer_id = create_buffer_record(runtime, state, command, title, cwd, env)?;
+            let buffer_id = create_buffer_record(runtime, state, None, command, title, cwd, env)?;
             Ok(buffer_id.0.to_string())
         })
     }
@@ -688,6 +688,7 @@ fn ensure_root_window(
     let buffer_id = create_buffer_record(
         runtime,
         state,
+        Some(session_id),
         &command,
         &title,
         Some(directory),
@@ -717,6 +718,7 @@ fn ensure_root_window(
 fn create_buffer_record(
     runtime: &tokio::runtime::Runtime,
     state: &mut EmbersClientState,
+    session_id: Option<SessionId>,
     command: &[String],
     title: &str,
     cwd: Option<&Path>,
@@ -729,6 +731,8 @@ fn create_buffer_record(
             command: command.to_vec(),
             cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
             env: env.clone(),
+            size: None,
+            session_id,
         },
     )))?;
     match response {
@@ -1228,6 +1232,8 @@ mod tests {
                 focused_leaf_id: Some(NodeId(2)),
                 focused_floating_id: None,
                 zoomed_node_id: None,
+                viewport: None,
+                base_index: None,
             },
         );
         state.nodes.insert(
@@ -1339,6 +1345,8 @@ mod tests {
             activity: ActivityState::Idle,
             last_snapshot_seq: 0,
             exit_code: None,
+            user_options: BTreeMap::new(),
+            foreground_command: None,
             env: BTreeMap::new(),
         }
     }

@@ -37,7 +37,7 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 
 | Key | Type | Default | Valid values | Notes |
 | --- | --- | --- | --- | --- |
-| `kind` | string | `"auto"` | `auto`, `tmux`, `embers` | With the `embers` Cargo feature enabled, `auto` prefers Embers when an Embers socket is configured or exposed via `EMBERS_SOCKET`; otherwise Wisp falls back to tmux. Without that feature, `auto` always uses tmux and explicit `embers` reports that support was not compiled in. |
+| `kind` | string | `"auto"` | `auto`, `tmux`, `embers` | `auto` prefers Embers when an Embers socket is configured or exposed via `EMBERS_SOCKET`; otherwise Wisp falls back to tmux. Builds without Embers support (non-Unix targets, or `--no-default-features`) always use tmux for `auto`, and explicit `embers` reports that support was not compiled in. |
 
 ### `[ui]`
 
@@ -72,7 +72,7 @@ The config library supports a strict mode that rejects unknown TOML keys using `
 | `popup_width` | string | `"80%"` | percent or cells | Popup width, for example `"80%"` or `"120"`. |
 | `popup_height` | string | `"85%"` | percent or cells | Popup height, for example `"85%"` or `"40"`. |
 
-Embers runtime support is behind the `embers` Cargo feature and expects the local Embers checkout used by the adapter crate. When Wisp is built with that feature and `backend.kind = "embers"`, `wisp fullscreen`, `wisp popup`, `wisp sidebar-popup`, `wisp sidebar-pane`, and the internal `wisp ui ...` surfaces work against Embers. `wisp popup` and `wisp sidebar-popup` open native Embers floating windows, and `wisp sidebar-pane` opens a root-level split sidebar in the current session. Popup sizing still reuses `tmux.popup_width` and `tmux.popup_height`. `wisp statusline ...` remains tmux-only for now.
+Embers support is part of the default build on Unix targets (the `embers` Cargo feature). With `backend.kind = "embers"`, `wisp fullscreen`, `wisp popup`, `wisp sidebar-popup`, `wisp sidebar-pane`, and the internal `wisp ui ...` surfaces work against Embers. `wisp popup` and `wisp sidebar-popup` open native Embers floating windows, and `wisp sidebar-pane` opens a root-level split sidebar in the current session. Popup sizing still reuses `tmux.popup_width` and `tmux.popup_height`. `wisp statusline ...` remains tmux-only for now.
 
 ### `[status]`
 
