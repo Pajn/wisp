@@ -579,9 +579,9 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embers-client"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f650ac9864b5f40bb42358ec665b316e3e0ab63211bc019c2a7d030d222775f2"
+checksum = "62b8628bbc82e6f2311c63fad236d50e6b201b90a70311b60b9c42558c34e631"
 dependencies = [
  "async-trait",
  "base64",
@@ -601,9 +601,9 @@ dependencies = [
 
 [[package]]
 name = "embers-core"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e03ca087ab0a9114296e1f21ab4f6f73006e7597718bc46ae7fda523e4a93e3"
+checksum = "3b2e9c17f4982362cf4fe4988f7847ab2d26e9ed81d827289c0cd4aa3e1907a6"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -614,9 +614,9 @@ dependencies = [
 
 [[package]]
 name = "embers-protocol"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90048c5d6d307e63054aee782f367576afccc6cfb9a9acbebeef102235475591"
+checksum = "eb9f7481c8da4e4499fc93bf8fb4ff3db8e4eac0e9fe7f3682b77521aaa0603c"
 dependencies = [
  "embers-core",
  "flatbuffers",
@@ -626,9 +626,9 @@ dependencies = [
 
 [[package]]
 name = "embers-server"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b26dc32e784e7fce750e1334e1f93df4087fcff42c97717825b115dce04ec5f8"
+checksum = "19a75851334cdef314bcafa13b14cdae0316b8f7cab99eeaa22ef1bc587b4be7"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -644,9 +644,9 @@ dependencies = [
 
 [[package]]
 name = "embers-test-support"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b647be8cc30d0dc6045476a610c92b4ca269053a150c9da13e23d1c3a7e00a"
+checksum = "3a8b66f63a6184fdfba9738e76170d59d2b6f2cff10e986c1a6fa68bfc4c13ed"
 dependencies = [
  "assert_cmd",
  "base64",
