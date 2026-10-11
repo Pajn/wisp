@@ -2,7 +2,8 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use embers_core::{BufferId, SessionId, new_request_id};
@@ -104,6 +105,15 @@ async fn create_session_with_buffer(
     connection: &mut TestConnection,
     name: &str,
 ) -> (SessionId, BufferId) {
+    create_session_running(connection, name, shell_sleep_command(30)).await
+}
+
+/// Like [`create_session_with_buffer`], with the buffer running `command`.
+async fn create_session_running(
+    connection: &mut TestConnection,
+    name: &str,
+    command: Vec<String>,
+) -> (SessionId, BufferId) {
     let session_id = match connection
         .request(&ClientMessage::Session(SessionRequest::Create {
             request_id: new_request_id(),
@@ -119,7 +129,7 @@ async fn create_session_with_buffer(
         .request(&ClientMessage::Buffer(BufferRequest::Create {
             request_id: new_request_id(),
             title: Some(name.to_string()),
-            command: shell_sleep_command(30),
+            command,
             cwd: None,
             env: BTreeMap::new(),
             size: None,
@@ -539,17 +549,14 @@ fn target_is_resolved_again_after_its_client_disconnects() {
 
     // Detaching and attaching again gives the user a new client id.
     drop(first);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while runtime
         .block_on(list_clients(&mut setup))
         .iter()
         .any(|record| record.id == first_id)
     {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "first client never disconnected"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert!(Instant::now() < deadline, "first client never disconnected");
+        thread::sleep(Duration::from_millis(25));
     }
     let (_second, second_id) = runtime.block_on(attach_user_client(&server, alpha_id));
 
@@ -668,6 +675,53 @@ fn switching_sessions_switches_the_target_client() {
     assert_eq!(attached, vec![user_id]);
 
     let _ = fs::remove_dir_all(&workspace);
+    runtime
+        .block_on(server.shutdown())
+        .expect("shutdown embers server");
+}
+
+#[test]
+fn session_preview_carries_the_panes_colors() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let server = runtime
+        .block_on(TestServer::start())
+        .expect("start embers server");
+    let mut setup = runtime
+        .block_on(TestConnection::connect(server.socket_path()))
+        .expect("connect setup client");
+    // A kitty image placeholder cell: U+10EEEE with row and column
+    // diacritics, the image id in the foreground and the placement id in the
+    // underline color.
+    let script = concat!(
+        r"printf '\033[31mred\033[0m \033[1;38;2;10;20;30mrgb\033[0m ",
+        r"\033[38;5;42;58;5;7m\364\216\273\256\314\205\314\215\033[0m\n'; ",
+        "sleep 30",
+    );
+    let command = vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+    let (session_id, _) = runtime.block_on(create_session_running(&mut setup, "styled", command));
+    let (_user, _) = runtime.block_on(attach_user_client(&server, session_id));
+
+    let client =
+        EmbersClient::connect_with_launch_env(server.socket_path(), EmbersLaunchEnv::default())
+            .expect("create embers client");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let preview = loop {
+        let preview = client
+            .capture_session_preview("styled", 40)
+            .expect("capture preview");
+        if preview.contains("rgb") || Instant::now() >= deadline {
+            break preview;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+
+    assert_eq!(
+        preview,
+        "\u{1b}[0;31mred\u{1b}[0m \u{1b}[0;1;38;2;10;20;30mrgb\u{1b}[0m \
+         \u{1b}[0;38;5;42;58;5;7m\u{10EEEE}\u{0305}\u{030D}\u{1b}[0m"
+    );
+
     runtime
         .block_on(server.shutdown())
         .expect("shutdown embers server");
