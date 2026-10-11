@@ -1,0 +1,10 @@
+# `cargo release <level>` bumps the shared version, commits, tags `vX.Y.Z`, and
+# pushes. Pushing the tag starts `.github/workflows/release.yml`, which
+# publishes the crates and the release binaries, so nothing publishes locally.
+allow-branch = ["main"]
+shared-version = true
+consolidate-commits = true
+pre-release-commit-message = "release: v{{version}}"
+tag-name = "v{{version}}"
+tag-message = "v{{version}}"
+publish = false
