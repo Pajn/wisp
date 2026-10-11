@@ -1231,6 +1231,19 @@ fn surface_command_args(kind: SurfaceKind, mode: PickerMode) -> Vec<String> {
     }
 }
 
+/// The command line of a wisp surface run in an Embers buffer: this wisp
+/// executable followed by the surface's arguments. Embers runs the command as
+/// given, so it needs the program, unlike the arguments tmux popups append.
+#[cfg(embers)]
+fn embers_surface_command(
+    kind: SurfaceKind,
+    mode: PickerMode,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut command = vec![env::current_exe()?.to_string_lossy().into_owned()];
+    command.extend(surface_command_args(kind, mode));
+    Ok(command)
+}
+
 #[cfg(embers)]
 fn surface_title(kind: SurfaceKind) -> &'static str {
     match kind {
@@ -1349,7 +1362,7 @@ fn open_popup_or_run_inline(
             let (viewport_cols, viewport_rows) = client
                 .current_session_viewport_size()?
                 .ok_or_else(|| "embers popup requires an active embers session".to_string())?;
-            let command = surface_command_args(kind, mode);
+            let command = embers_surface_command(kind, mode)?;
             let cwd = env::current_dir()?;
             let width = resolve_dimension_to_cells(&config.tmux.popup_width, viewport_cols);
             let height = resolve_dimension_to_cells(&config.tmux.popup_height, viewport_rows);
@@ -1411,7 +1424,7 @@ fn open_sidebar_popup_or_run_inline(
                     "embers sidebar-popup requires an active embers session".to_string()
                 })?;
             let command =
-                surface_command_args(SurfaceKind::SidebarCompact, PickerMode::AllSessions);
+                embers_surface_command(SurfaceKind::SidebarCompact, PickerMode::AllSessions)?;
             let cwd = env::current_dir()?;
             let buffer_id = client.create_buffer(
                 &command,
@@ -1447,7 +1460,7 @@ fn open_sidebar_pane(backend: &RuntimeBackend) -> Result<(), Box<dyn Error>> {
         #[cfg(embers)]
         RuntimeBackend::Embers(client) => {
             let command =
-                surface_command_args(SurfaceKind::SidebarCompact, PickerMode::AllSessions);
+                embers_surface_command(SurfaceKind::SidebarCompact, PickerMode::AllSessions)?;
             let cwd = env::current_dir()?;
             let buffer_id = client.create_buffer(
                 &command,
@@ -3075,6 +3088,21 @@ mod tests {
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[cfg(embers)]
+    #[test]
+    fn embers_surface_commands_start_with_the_wisp_executable() {
+        let command =
+            super::embers_surface_command(SurfaceKind::Picker, super::PickerMode::AllSessions)
+                .expect("command");
+        assert_eq!(
+            command[0],
+            std::env::current_exe()
+                .expect("current exe")
+                .to_string_lossy()
+        );
+        assert_eq!(&command[1..], ["ui", "picker"]);
+    }
 
     use wisp_config::{KeyAction, ResolvedConfig, SessionSortMode};
     use wisp_kindra::{KindraError, KindraProvider};
