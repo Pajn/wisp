@@ -1231,6 +1231,19 @@ fn surface_command_args(kind: SurfaceKind, mode: PickerMode) -> Vec<String> {
     }
 }
 
+/// The command line of a wisp surface run in an Embers buffer: this wisp
+/// executable followed by the surface's arguments. Embers runs the command as
+/// given, so it needs the program, unlike the arguments tmux popups append.
+#[cfg(embers)]
+fn embers_surface_command(
+    kind: SurfaceKind,
+    mode: PickerMode,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut command = vec![env::current_exe()?.to_string_lossy().into_owned()];
+    command.extend(surface_command_args(kind, mode));
+    Ok(command)
+}
+
 #[cfg(embers)]
 fn surface_title(kind: SurfaceKind) -> &'static str {
     match kind {
@@ -1239,16 +1252,26 @@ fn surface_title(kind: SurfaceKind) -> &'static str {
     }
 }
 
+/// Environment for a wisp surface started in an Embers buffer. It names the
+/// client this wisp acts for, so the surface acts for the same client rather
+/// than resolving one again from its own pane.
 #[cfg(embers)]
-fn embers_sidebar_env(persistent: bool) -> BTreeMap<String, String> {
+fn embers_surface_env(
+    client: &EmbersClient,
+    persistent: bool,
+) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     let mut env = BTreeMap::new();
+    env.insert(
+        wisp_embers::CLIENT_ENV_VAR.to_string(),
+        client.target_client_id()?.to_string(),
+    );
     if persistent {
         env.insert(
             EMBERS_SURFACE_ENV.to_string(),
             EMBERS_SIDEBAR_PANE_SURFACE.to_string(),
         );
     }
-    env
+    Ok(env)
 }
 
 #[cfg(embers)]
@@ -1339,7 +1362,7 @@ fn open_popup_or_run_inline(
             let (viewport_cols, viewport_rows) = client
                 .current_session_viewport_size()?
                 .ok_or_else(|| "embers popup requires an active embers session".to_string())?;
-            let command = surface_command_args(kind, mode);
+            let command = embers_surface_command(kind, mode)?;
             let cwd = env::current_dir()?;
             let width = resolve_dimension_to_cells(&config.tmux.popup_width, viewport_cols);
             let height = resolve_dimension_to_cells(&config.tmux.popup_height, viewport_rows);
@@ -1347,16 +1370,12 @@ fn open_popup_or_run_inline(
                 &command,
                 surface_title(kind),
                 Some(&cwd),
-                &BTreeMap::new(),
+                &embers_surface_env(client, false)?,
             )?;
             create_embers_floating_for_buffer(
-                client,
-                &buffer_id,
-                Some(surface_title(kind)),
-                width,
-                height,
-                true,
-                true,
+                client, &buffer_id,
+                // No frame title: the surface draws its own, as in a tmux popup.
+                None, width, height, true, true,
             )?;
             Ok(())
         }
@@ -1401,18 +1420,19 @@ fn open_sidebar_popup_or_run_inline(
                     "embers sidebar-popup requires an active embers session".to_string()
                 })?;
             let command =
-                surface_command_args(SurfaceKind::SidebarCompact, PickerMode::AllSessions);
+                embers_surface_command(SurfaceKind::SidebarCompact, PickerMode::AllSessions)?;
             let cwd = env::current_dir()?;
             let buffer_id = client.create_buffer(
                 &command,
                 surface_title(SurfaceKind::SidebarCompact),
                 Some(&cwd),
-                &BTreeMap::new(),
+                &embers_surface_env(client, false)?,
             )?;
             create_embers_floating_for_buffer(
                 client,
                 &buffer_id,
-                Some(surface_title(SurfaceKind::SidebarCompact)),
+                // No frame title: the surface draws its own, as in a tmux popup.
+                None,
                 resolve_dimension_to_cells(&Dimension::Percent(35), viewport_cols),
                 resolve_dimension_to_cells(&Dimension::Percent(85), viewport_rows),
                 true,
@@ -1437,13 +1457,13 @@ fn open_sidebar_pane(backend: &RuntimeBackend) -> Result<(), Box<dyn Error>> {
         #[cfg(embers)]
         RuntimeBackend::Embers(client) => {
             let command =
-                surface_command_args(SurfaceKind::SidebarCompact, PickerMode::AllSessions);
+                embers_surface_command(SurfaceKind::SidebarCompact, PickerMode::AllSessions)?;
             let cwd = env::current_dir()?;
             let buffer_id = client.create_buffer(
                 &command,
                 SIDEBAR_PANE_TITLE,
                 Some(&cwd),
-                &embers_sidebar_env(true),
+                &embers_surface_env(client, true)?,
             )?;
             join_embers_buffer_to_current_session_root(
                 client,
@@ -3065,6 +3085,21 @@ mod tests {
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[cfg(embers)]
+    #[test]
+    fn embers_surface_commands_start_with_the_wisp_executable() {
+        let command =
+            super::embers_surface_command(SurfaceKind::Picker, super::PickerMode::AllSessions)
+                .expect("command");
+        assert_eq!(
+            command[0],
+            std::env::current_exe()
+                .expect("current exe")
+                .to_string_lossy()
+        );
+        assert_eq!(&command[1..], ["ui", "picker"]);
+    }
 
     use wisp_config::{KeyAction, ResolvedConfig, SessionSortMode};
     use wisp_kindra::{KindraError, KindraProvider};

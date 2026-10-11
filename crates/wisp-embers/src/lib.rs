@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
@@ -16,6 +17,33 @@ use thiserror::Error;
 
 pub use embers_core::ActivityState as EmbersActivityState;
 pub use embers_protocol::NodeJoinPlacement as EmbersJoinPlacement;
+
+/// Set by Embers (0.3.2 and newer) for programs started by a `run_shell`
+/// binding: the id of the client that ran the binding.
+pub const CLIENT_ENV_VAR: &str = "EMBERS_CLIENT";
+/// Set by Embers for programs running in a pane: the id of that pane's buffer.
+/// `run_shell` sets it to the focused buffer of the client that ran the binding.
+pub const BUFFER_ENV_VAR: &str = "EMBERS_BUFFER";
+
+/// The Embers environment wisp was started with, used to work out which
+/// client wisp acts for. Values are kept raw; unparsable ones are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmbersLaunchEnv {
+    /// `EMBERS_CLIENT`.
+    pub client: Option<String>,
+    /// `EMBERS_BUFFER`.
+    pub buffer: Option<String>,
+}
+
+impl EmbersLaunchEnv {
+    #[must_use]
+    pub fn from_process() -> Self {
+        Self {
+            client: std::env::var(CLIENT_ENV_VAR).ok(),
+            buffer: std::env::var(BUFFER_ENV_VAR).ok(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbersSnapshot {
@@ -87,6 +115,10 @@ pub enum EmbersError {
     MissingPreview(String),
     #[error("embers client has no current session")]
     MissingCurrentSession,
+    #[error(
+        "could not tell which embers client to act for; set {CLIENT_ENV_VAR} to a client id from `embers list-clients`"
+    )]
+    NoTargetClient,
     #[error("embers protocol returned an unexpected response: {0}")]
     UnexpectedResponse(&'static str),
     #[error("invalid embers state: {0}")]
@@ -105,7 +137,13 @@ pub struct EmbersClient {
 #[derive(Debug)]
 struct EmbersClientState {
     client: MuxClient<SocketTransport>,
-    client_id: u64,
+    /// Wisp's own connection. Wisp never attaches it to a session; the
+    /// current session is read from, and switched on, the target client.
+    own_client_id: u64,
+    launch: EmbersLaunchEnv,
+    /// The client wisp acts for, resolved on first use by
+    /// `resolve_target_client` and kept for the life of the connection.
+    target_client_id: Option<u64>,
     previous_session_id: Option<SessionId>,
 }
 
@@ -116,7 +154,23 @@ struct WindowProjection {
 }
 
 impl EmbersClient {
+    /// Connects and acts for the client named by this process's `EMBERS_*`
+    /// environment; see [`EmbersClient::connect_with_launch_env`].
     pub fn connect(socket_path: impl Into<PathBuf>) -> Result<Self, EmbersError> {
+        Self::connect_with_launch_env(socket_path, EmbersLaunchEnv::from_process())
+    }
+
+    /// Connects to the server at `socket_path`.
+    ///
+    /// Wisp's connection is a client of its own, attached to no session, so
+    /// everything wisp does "in the current session" is done for another
+    /// client: the target. It is resolved from `launch` the first time it is
+    /// needed (see `resolve_target_client`), so connecting succeeds even when
+    /// no target can be found.
+    pub fn connect_with_launch_env(
+        socket_path: impl Into<PathBuf>,
+        launch: EmbersLaunchEnv,
+    ) -> Result<Self, EmbersError> {
         let socket_path = socket_path.into();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -138,7 +192,9 @@ impl EmbersClient {
             runtime,
             state: Mutex::new(EmbersClientState {
                 client,
-                client_id: current_client.id,
+                own_client_id: current_client.id,
+                launch,
+                target_client_id: None,
                 previous_session_id: None,
             }),
         })
@@ -149,12 +205,19 @@ impl EmbersClient {
         &self.socket_path
     }
 
+    /// The id of the client wisp acts for, resolving it if needed.
+    pub fn target_client_id(&self) -> Result<u64, EmbersError> {
+        self.with_state(|runtime, state| Ok(target_client_record(runtime, state)?.id))
+    }
+
     pub fn snapshot(&self) -> Result<EmbersSnapshot, EmbersError> {
         self.with_state(|runtime, state| {
             runtime.block_on(state.client.resync_all_sessions())?;
-            let current_client = current_client_record(runtime, state)?;
             let clients = list_clients(runtime, state)?;
-            build_snapshot(state, &clients, &current_client)
+            // Listing sessions does not need a target, so a snapshot without
+            // one just has no current session.
+            let target_client = target_client_among(runtime, state, &clients);
+            build_snapshot(state, &clients, target_client.as_ref())
         })
     }
 
@@ -175,7 +238,7 @@ impl EmbersClient {
             {
                 saw_event = true;
                 if let ServerEvent::ClientChanged(event) = event
-                    && event.client.id == state.client_id
+                    && Some(event.client.id) == state.target_client_id
                 {
                     state.previous_session_id = event.previous_session_id;
                 }
@@ -187,15 +250,15 @@ impl EmbersClient {
     pub fn switch_session(&self, session_name: &str) -> Result<(), EmbersError> {
         self.with_state(|runtime, state| {
             runtime.block_on(state.client.resync_all_sessions())?;
-            let current_client = current_client_record(runtime, state)?;
-            let session = resolve_session_by_name(state.client.state(), session_name)?;
-            if current_client.current_session_id == Some(session.id) {
+            let target_client = target_client_record(runtime, state)?;
+            let session_id = resolve_session_by_name(state.client.state(), session_name)?.id;
+            if target_client.current_session_id == Some(session_id) {
                 // Already on the target session; switching would clobber
                 // previous_session_id with the current session itself.
                 return Ok(());
             }
-            state.previous_session_id = current_client.current_session_id;
-            runtime.block_on(state.client.switch_current_session(session.id))?;
+            state.previous_session_id = target_client.current_session_id;
+            switch_client_session(runtime, state, target_client.id, session_id)?;
             // The next snapshot()/poll_updates refreshes session state, so no
             // trailing resync_all_sessions is needed here.
             Ok(())
@@ -209,24 +272,24 @@ impl EmbersClient {
     ) -> Result<(), EmbersError> {
         self.with_state(|runtime, state| {
             runtime.block_on(state.client.resync_all_sessions())?;
-            let current_client = current_client_record(runtime, state)?;
+            let target_client = target_client_record(runtime, state)?;
             if let Ok(existing_id) = resolve_session_by_name(state.client.state(), session_name)
                 .map(|session| session.id)
             {
                 ensure_root_window(runtime, state, existing_id, directory)?;
-                if current_client.current_session_id != Some(existing_id) {
+                if target_client.current_session_id != Some(existing_id) {
                     // Skip the no-op switch so previous_session_id is not
                     // clobbered when the target is already the current session.
-                    state.previous_session_id = current_client.current_session_id;
-                    runtime.block_on(state.client.switch_current_session(existing_id))?;
+                    state.previous_session_id = target_client.current_session_id;
+                    switch_client_session(runtime, state, target_client.id, existing_id)?;
                 }
                 return Ok(());
             }
 
             let session_id = create_session(runtime, state, session_name)?;
             ensure_root_window(runtime, state, session_id, directory)?;
-            state.previous_session_id = current_client.current_session_id;
-            runtime.block_on(state.client.switch_current_session(session_id))?;
+            state.previous_session_id = target_client.current_session_id;
+            switch_client_session(runtime, state, target_client.id, session_id)?;
             // The next snapshot()/poll_updates refreshes session state, so no
             // trailing resync_all_sessions is needed here.
             Ok(())
@@ -296,13 +359,13 @@ impl EmbersClient {
 
     pub fn current_session_name(&self) -> Result<Option<String>, EmbersError> {
         // Resolving only the current session's name does not need a full
-        // `resync_all_sessions()`: `current_client()` is a single lightweight
-        // request, and the name is read from the already-synced session cache
-        // (kept fresh by `poll_updates`). This runs on the per-frame sidebar
+        // `resync_all_sessions()`: once the target client is resolved, reading
+        // it is a single lightweight request, and the name is read from the
+        // already-synced session cache (kept fresh by `poll_updates`). This runs on the per-frame sidebar
         // handoff check, so the full resync would be wasteful here.
         self.with_state(|runtime, state| {
-            let current_client = current_client_record(runtime, state)?;
-            Ok(current_client.current_session_id.and_then(|session_id| {
+            let target_client = target_client_record(runtime, state)?;
+            Ok(target_client.current_session_id.and_then(|session_id| {
                 state
                     .client
                     .state()
@@ -315,11 +378,11 @@ impl EmbersClient {
 
     pub fn focused_buffer_id(&self) -> Result<Option<String>, EmbersError> {
         // Only the current session is needed, so resolve it via the lightweight
-        // `current_client_record` + a single `resync_session`, skipping the full
+        // `target_client_record` + a single `resync_session`, skipping the full
         // `resync_all_sessions` (same reasoning as `current_session_name`).
         self.with_state(|runtime, state| {
-            let current_client = current_client_record(runtime, state)?;
-            let Some(session_id) = current_client.current_session_id else {
+            let target_client = target_client_record(runtime, state)?;
+            let Some(session_id) = target_client.current_session_id else {
                 return Ok(None);
             };
             runtime.block_on(state.client.resync_session(session_id))?;
@@ -332,8 +395,8 @@ impl EmbersClient {
         // See `focused_buffer_id`: only the current session matters here, so a
         // full `resync_all_sessions` is unnecessary.
         self.with_state(|runtime, state| {
-            let current_client = current_client_record(runtime, state)?;
-            let Some(session_id) = current_client.current_session_id else {
+            let target_client = target_client_record(runtime, state)?;
+            let Some(session_id) = target_client.current_session_id else {
                 return Ok(None);
             };
             runtime.block_on(state.client.resync_session(session_id))?;
@@ -549,13 +612,143 @@ impl EmbersClient {
     }
 }
 
-fn current_client_record(
+/// The current record of the client wisp acts for, resolving it first if this
+/// is the first time it is needed, or again once that client has gone (a
+/// detach and reattach gives the user a new client id).
+fn target_client_record(
     runtime: &tokio::runtime::Runtime,
     state: &mut EmbersClientState,
 ) -> Result<ClientRecord, EmbersError> {
-    let record = runtime.block_on(state.client.current_client())?;
-    state.client_id = record.id;
-    Ok(record)
+    if let Some(client_id) = state.target_client_id {
+        match get_client(runtime, state, client_id) {
+            Err(EmbersError::Mux(error)) if error.is_not_found() => {
+                state.target_client_id = None;
+            }
+            result => return result,
+        }
+    }
+    let clients = list_clients(runtime, state)?;
+    target_client_among(runtime, state, &clients).ok_or(EmbersError::NoTargetClient)
+}
+
+/// Like `target_client_record`, but reads the target from an existing client
+/// list, and gives `None` when there is no target.
+fn target_client_among(
+    runtime: &tokio::runtime::Runtime,
+    state: &mut EmbersClientState,
+    clients: &[ClientRecord],
+) -> Option<ClientRecord> {
+    if let Some(client_id) = state.target_client_id {
+        if let Some(client) = clients.iter().find(|client| client.id == client_id) {
+            return Some(client.clone());
+        }
+        // That client has gone; resolve the target again.
+        state.target_client_id = None;
+    }
+    let target = resolve_target_client(runtime, state, clients);
+    state.target_client_id = target.as_ref().map(|client| client.id);
+    target
+}
+
+/// Works out which client wisp acts for, taking the first of:
+///
+/// 1. `EMBERS_CLIENT`, if that client exists: the client whose `run_shell`
+///    binding started wisp.
+/// 2. `EMBERS_BUFFER`: a client whose current session holds that buffer, i.e.
+///    the client looking at the pane wisp was started from. When several
+///    clients show that session, the lowest client id (the longest-connected
+///    client) wins.
+/// 3. Wisp's own connection, if it is attached to a session.
+/// 4. The only client attached to a session, if there is exactly one.
+fn resolve_target_client(
+    runtime: &tokio::runtime::Runtime,
+    state: &mut EmbersClientState,
+    clients: &[ClientRecord],
+) -> Option<ClientRecord> {
+    let find = |client_id: u64| clients.iter().find(|client| client.id == client_id);
+
+    if let Some(client) = parse_launch_id(state.launch.client.as_deref()).and_then(find) {
+        return Some(client.clone());
+    }
+
+    if let Some(buffer_id) = parse_launch_id(state.launch.buffer.as_deref()).map(BufferId) {
+        // The buffer may have gone since wisp started; that is no reason to
+        // fail, only to try the next rule.
+        let session_id = buffer_location(runtime, state, buffer_id)
+            .ok()
+            .and_then(|location| location.session_id());
+        if let Some(session_id) = session_id
+            && let Some(client) = clients
+                .iter()
+                .filter(|client| client.current_session_id == Some(session_id))
+                .min_by_key(|client| client.id)
+        {
+            return Some(client.clone());
+        }
+    }
+
+    if let Some(client) =
+        find(state.own_client_id).filter(|client| client.current_session_id.is_some())
+    {
+        return Some(client.clone());
+    }
+
+    let mut attached = clients
+        .iter()
+        .filter(|client| client.current_session_id.is_some());
+    match (attached.next(), attached.next()) {
+        (Some(client), None) => Some(client.clone()),
+        _ => None,
+    }
+}
+
+fn parse_launch_id(value: Option<&str>) -> Option<u64> {
+    value?.trim().parse().ok()
+}
+
+fn get_client(
+    runtime: &tokio::runtime::Runtime,
+    state: &EmbersClientState,
+    client_id: u64,
+) -> Result<ClientRecord, EmbersError> {
+    let response = runtime.block_on(state.client.request_message(ClientMessage::Client(
+        ClientRequest::Get {
+            request_id: state.client.next_request_id(),
+            client_id: Some(client_id_param(client_id)?),
+        },
+    )))?;
+    match response {
+        ServerResponse::Client(response) => Ok(response.client),
+        _ => Err(EmbersError::UnexpectedResponse("client get")),
+    }
+}
+
+fn switch_client_session(
+    runtime: &tokio::runtime::Runtime,
+    state: &EmbersClientState,
+    client_id: u64,
+    session_id: SessionId,
+) -> Result<(), EmbersError> {
+    let response = runtime.block_on(state.client.request_message(ClientMessage::Client(
+        ClientRequest::Switch {
+            request_id: state.client.next_request_id(),
+            client_id: Some(client_id_param(client_id)?),
+            session_id,
+        },
+    )))?;
+    match response {
+        ServerResponse::Client(_) => Ok(()),
+        _ => Err(EmbersError::UnexpectedResponse("client switch")),
+    }
+}
+
+/// Client requests take `None` to mean the caller's own client, so a target
+/// is always passed explicitly.
+fn client_id_param(client_id: u64) -> Result<NonZeroU64, EmbersError> {
+    NonZeroU64::new(client_id).ok_or_else(|| EmbersError::InvalidIdentifier {
+        kind: "client",
+        value: client_id.to_string(),
+    })
 }
 
 fn list_clients(
@@ -578,8 +771,8 @@ fn current_session_info(
     state: &mut EmbersClientState,
 ) -> Result<(SessionId, String), EmbersError> {
     runtime.block_on(state.client.resync_all_sessions())?;
-    let current_client = current_client_record(runtime, state)?;
-    let session_id = current_client
+    let target_client = target_client_record(runtime, state)?;
+    let session_id = target_client
         .current_session_id
         .ok_or(EmbersError::MissingCurrentSession)?;
     let session_name = state
@@ -843,7 +1036,7 @@ fn visible_size_for_node(state: &ClientState, node_id: NodeId) -> Option<PtySize
 fn build_snapshot(
     state: &EmbersClientState,
     clients: &[ClientRecord],
-    current_client: &ClientRecord,
+    target_client: Option<&ClientRecord>,
 ) -> Result<EmbersSnapshot, EmbersError> {
     let client_state = state.client.state();
     let mut session_records = client_state.sessions.values().cloned().collect::<Vec<_>>();
@@ -870,17 +1063,16 @@ fn build_snapshot(
         });
     }
 
-    let current_session_name = current_client.current_session_id.and_then(|session_id| {
+    let current_session_id = target_client.and_then(|client| client.current_session_id);
+    let current_session_name = current_session_id.and_then(|session_id| {
         client_state
             .sessions
             .get(&session_id)
             .map(|session| session.name.clone())
     });
-    let current_window_index = current_client
-        .current_session_id
-        .and_then(|session_id| current_window_index(client_state, session_id));
-    let pane_id = current_client
-        .current_session_id
+    let current_window_index =
+        current_session_id.and_then(|session_id| current_window_index(client_state, session_id));
+    let pane_id = current_session_id
         .and_then(|session_id| client_state.sessions.get(&session_id))
         .and_then(|session| session.focused_leaf_id)
         .map(|pane_id| pane_id.to_string());
@@ -893,7 +1085,7 @@ fn build_snapshot(
 
     Ok(EmbersSnapshot {
         context: EmbersContext {
-            client_id: Some(current_client.id.to_string()),
+            client_id: target_client.map(|client| client.id.to_string()),
             current_session_name,
             current_window_index,
             pane_id,

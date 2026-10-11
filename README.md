@@ -83,6 +83,20 @@ WISP_BACKEND=embers WISP_EMBERS_SOCKET=/tmp/embers.sock wisp popup
 
 Current Embers support covers the main picker, session actions, previews, live refresh, native floating `wisp popup`, floating `wisp sidebar-popup`, and root-split `wisp sidebar-pane`. `wisp statusline ...` remains tmux-only.
 
+Example Embers binding, in your Embers config:
+
+```rhai
+bind("normal", "<leader>o", action.run_shell("wisp popup"));
+```
+
+Wisp acts for one Embers client: popups open in that client's session, and picking a session switches that client. It picks the client from the first of:
+
+1. `EMBERS_CLIENT`, which Embers 0.3.2 and newer set for programs started by `run_shell` to the client that ran the binding.
+2. `EMBERS_BUFFER`, set for programs running in an Embers pane: the client whose current session holds that pane. If several clients show that session, the one with the lowest id (the longest connected) is used.
+3. The only client attached to a session, if there is exactly one.
+
+Older Embers versions don't set `EMBERS_CLIENT`, so bindings there rely on the fallbacks. If none of them finds a client, Wisp exits with an error naming `EMBERS_CLIENT`, and Embers shows it in the status line. You can set it yourself to an id from `embers list-clients`.
+
 Use `--worktree` (or `-w`) to start the picker in worktree mode, which shows only sessions belonging to worktrees of the current repo alongside worktrees that don't yet have sessions.
 
 When the current repo has [Kindra](https://github.com/Pajn/kindra) temporary worktrees configured (a `[worktrees]` section in `kindra.toml` with the `temp` role enabled), worktree mode appends a `＋` row as you type. Your filter text is normalized into a branch slug — whitespace runs become dashes, and text that can't form a valid git branch name hides the row. Selecting it runs `kin wt temp -b <slug> <trunk>` to create a new temporary worktree branched off the repo's trunk, then creates and switches to a session in it. The trunk is resolved from the remote default branch (`origin/HEAD`), falling back to a local `main`/`master`.
