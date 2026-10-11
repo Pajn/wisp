@@ -15,6 +15,8 @@ use embers_protocol::{
 };
 use thiserror::Error;
 
+mod preview;
+
 pub use embers_core::ActivityState as EmbersActivityState;
 pub use embers_protocol::NodeJoinPlacement as EmbersJoinPlacement;
 
@@ -350,10 +352,22 @@ impl EmbersClient {
             runtime.block_on(state.client.resync_session(session_id))?;
             let buffer_id = preview_buffer_id(state.client.state(), session_id)
                 .ok_or_else(|| EmbersError::MissingPreview(session_name.to_string()))?;
-            let snapshot = runtime.block_on(state.client.capture_buffer(buffer_id))?;
-            let line_count = snapshot.lines.len();
-            let start = line_count.saturating_sub(max_lines);
-            Ok(snapshot.lines[start..].join("\n"))
+            // The visible snapshot carries each line's styles; a plain
+            // capture has text only. Requested directly rather than through
+            // `refresh_buffer_snapshot`, which would keep every previewed
+            // buffer's snapshot in the client state.
+            let response = runtime.block_on(state.client.request_message(
+                ClientMessage::Buffer(BufferRequest::CaptureVisible {
+                    request_id: state.client.next_request_id(),
+                    buffer_id,
+                }),
+            ))?;
+            match response {
+                ServerResponse::VisibleSnapshot(snapshot) => {
+                    Ok(preview::preview_text(&snapshot.lines, max_lines))
+                }
+                _ => Err(EmbersError::UnexpectedResponse("buffer capture visible")),
+            }
         })
     }
 

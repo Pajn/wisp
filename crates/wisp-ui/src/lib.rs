@@ -724,19 +724,36 @@ fn flush_span(spans: &mut Vec<Span<'static>>, plain: &mut String, style: Style) 
     spans.push(Span::styled(std::mem::take(plain), style));
 }
 
+/// Applies one SGR sequence (the parameters between `ESC [` and `m`).
+///
+/// Parameters are `;`-separated. A parameter may carry `:`-separated
+/// sub-parameters (ITU T.416 form), as in `4:3` for a curly underline or
+/// `38:2::r:g:b`; those are read as one parameter.
 fn apply_sgr(mut style: Style, sequence: &str) -> Style {
-    let codes = if sequence.is_empty() {
-        vec![0]
+    let params = if sequence.is_empty() {
+        vec![vec![0]]
     } else {
         sequence
             .split(';')
-            .map(|part| part.parse::<u16>().unwrap_or(0))
+            .map(|param| {
+                param
+                    .split(':')
+                    .map(|part| part.parse::<u16>().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>()
     };
 
     let mut index = 0;
-    while index < codes.len() {
-        match codes[index] {
+    while index < params.len() {
+        let param = &params[index];
+        let code = param[0];
+        if param.len() > 1 {
+            style = apply_sgr_subparams(style, code, &param[1..]);
+            index += 1;
+            continue;
+        }
+        match code {
             0 => style = Style::default(),
             1 => style = style.add_modifier(Modifier::BOLD),
             2 => style = style.add_modifier(Modifier::DIM),
@@ -744,33 +761,35 @@ fn apply_sgr(mut style: Style, sequence: &str) -> Style {
             4 => style = style.add_modifier(Modifier::UNDERLINED),
             5 => style = style.add_modifier(Modifier::SLOW_BLINK),
             7 => style = style.add_modifier(Modifier::REVERSED),
+            8 => style = style.add_modifier(Modifier::HIDDEN),
             9 => style = style.add_modifier(Modifier::CROSSED_OUT),
             22 => style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
             23 => style = style.remove_modifier(Modifier::ITALIC),
             24 => style = style.remove_modifier(Modifier::UNDERLINED),
             25 => style = style.remove_modifier(Modifier::SLOW_BLINK),
             27 => style = style.remove_modifier(Modifier::REVERSED),
+            28 => style = style.remove_modifier(Modifier::HIDDEN),
             29 => style = style.remove_modifier(Modifier::CROSSED_OUT),
             30..=37 | 90..=97 => {
-                style.fg = Some(ansi_named_color(codes[index]));
+                style.fg = Some(ansi_named_color(code));
             }
             39 => style.fg = Some(Color::Reset),
             40..=47 | 100..=107 => {
-                style.bg = Some(ansi_named_color(codes[index]));
+                style.bg = Some(ansi_named_color(code));
             }
             49 => style.bg = Some(Color::Reset),
-            38 | 48 => {
-                let is_foreground = codes[index] == 38;
-                let slice = &codes[index + 1..];
-                if let Some((color, consumed)) = ansi_extended_color(slice) {
-                    if is_foreground {
-                        style.fg = Some(color);
-                    } else {
-                        style.bg = Some(color);
-                    }
+            38 | 48 | 58 => {
+                let rest = params[index + 1..]
+                    .iter()
+                    .take(4)
+                    .map(|param| param[0])
+                    .collect::<Vec<_>>();
+                if let Some((color, consumed)) = ansi_extended_color(&rest) {
+                    style = set_extended_color(style, code, color);
                     index += consumed;
                 }
             }
+            59 => style.underline_color = Some(Color::Reset),
             _ => {}
         }
         index += 1;
@@ -779,19 +798,46 @@ fn apply_sgr(mut style: Style, sequence: &str) -> Style {
     style
 }
 
+fn apply_sgr_subparams(style: Style, code: u16, subparams: &[u16]) -> Style {
+    match (code, subparams) {
+        // `4:0` turns the underline off; `4:1`..`4:5` pick a style, which a
+        // ratatui cell cannot tell apart, so they all underline.
+        (4, [0, ..]) => style.remove_modifier(Modifier::UNDERLINED),
+        (4, _) => style.add_modifier(Modifier::UNDERLINED),
+        // `38:2::r:g:b` carries a color space id before the components.
+        (38 | 48 | 58, [2, _, red, green, blue, ..]) | (38 | 48 | 58, [2, red, green, blue]) => {
+            set_extended_color(style, code, rgb_color(*red, *green, *blue))
+        }
+        (38 | 48 | 58, [5, value, ..]) => {
+            set_extended_color(style, code, Color::Indexed(clamp_u8(*value)))
+        }
+        _ => style,
+    }
+}
+
+fn set_extended_color(mut style: Style, code: u16, color: Color) -> Style {
+    match code {
+        38 => style.fg = Some(color),
+        48 => style.bg = Some(color),
+        _ => style.underline_color = Some(color),
+    }
+    style
+}
+
 fn ansi_extended_color(codes: &[u16]) -> Option<(Color, usize)> {
     match codes {
-        [5, value, ..] => Some((Color::Indexed((*value).min(u8::MAX as u16) as u8), 2)),
-        [2, red, green, blue, ..] => Some((
-            Color::Rgb(
-                (*red).min(u8::MAX as u16) as u8,
-                (*green).min(u8::MAX as u16) as u8,
-                (*blue).min(u8::MAX as u16) as u8,
-            ),
-            4,
-        )),
+        [5, value, ..] => Some((Color::Indexed(clamp_u8(*value)), 2)),
+        [2, red, green, blue, ..] => Some((rgb_color(*red, *green, *blue), 4)),
         _ => None,
     }
+}
+
+fn rgb_color(red: u16, green: u16, blue: u16) -> Color {
+    Color::Rgb(clamp_u8(red), clamp_u8(green), clamp_u8(blue))
+}
+
+fn clamp_u8(value: u16) -> u8 {
+    value.min(u16::from(u8::MAX)) as u8
 }
 
 fn ansi_named_color(code: u16) -> Color {
@@ -821,7 +867,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use wisp_core::{
         AttentionBadge, GitBranchStatus, GitBranchSync, PickerMode, SessionListItem,
         SessionListItemKind,
@@ -1051,6 +1097,68 @@ mod tests {
 
         assert_eq!(first_span.content, "red");
         assert_eq!(first_span.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn preview_underline_color_does_not_leak_into_other_attributes() {
+        // tmux `capture-pane -e` writes the underline color as `58;2;r;g;b`.
+        let text = ansi_preview_text(&[
+            "\u{1b}[4m\u{1b}[58;2;1;2;3mrgb\u{1b}[58;5;12mindexed\u{1b}[59mreset".to_string(),
+        ]);
+        let spans = &text.lines[0].spans;
+
+        assert_eq!(spans[0].content, "rgb");
+        assert_eq!(spans[0].style.underline_color, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(spans[0].style.add_modifier, Modifier::UNDERLINED);
+        assert_eq!(spans[1].style.underline_color, Some(Color::Indexed(12)));
+        assert_eq!(spans[2].style.underline_color, Some(Color::Reset));
+    }
+
+    #[test]
+    fn preview_underline_style_subparameters_underline() {
+        let text = ansi_preview_text(&["\u{1b}[31;4:3mcurly\u{1b}[4:0moff".to_string()]);
+        let spans = &text.lines[0].spans;
+
+        assert_eq!(spans[0].style.fg, Some(Color::Red));
+        assert_eq!(spans[0].style.add_modifier, Modifier::UNDERLINED);
+        assert_eq!(spans[1].style.fg, Some(Color::Red));
+        assert!(!spans[1].style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn preview_colon_separated_colors_parse() {
+        let text = ansi_preview_text(&["\u{1b}[38:2::10:20:30;48:5:4;58:2::1:2:3mx".to_string()]);
+        let style = text.lines[0].spans[0].style;
+
+        assert_eq!(style.fg, Some(Color::Rgb(10, 20, 30)));
+        assert_eq!(style.bg, Some(Color::Indexed(4)));
+        assert_eq!(style.underline_color, Some(Color::Rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn preview_hidden_text_is_hidden() {
+        let text = ansi_preview_text(&["\u{1b}[8msecret\u{1b}[28mshown".to_string()]);
+        let spans = &text.lines[0].spans;
+
+        assert_eq!(spans[0].style.add_modifier, Modifier::HIDDEN);
+        assert!(spans[1].style.sub_modifier.contains(Modifier::HIDDEN));
+    }
+
+    #[test]
+    fn preview_keeps_kitty_placeholders_with_their_colors() {
+        // A kitty Unicode placeholder: U+10EEEE plus row and column
+        // diacritics, the image id in the foreground color and the placement
+        // id in the underline color.
+        let placeholder = "\u{10EEEE}\u{0305}\u{030D}";
+        let text = ansi_preview_text(&[format!(
+            "\u{1b}[38;2;0;0;42m\u{1b}[58;5;7m{placeholder}{placeholder}\u{1b}[0m"
+        )]);
+        let span = &text.lines[0].spans[0];
+
+        assert_eq!(span.content, format!("{placeholder}{placeholder}"));
+        assert_eq!(span.style.fg, Some(Color::Rgb(0, 0, 42)));
+        assert_eq!(span.style.underline_color, Some(Color::Indexed(7)));
+        assert_eq!(span.style.add_modifier, Modifier::empty());
     }
 
     #[test]
