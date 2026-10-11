@@ -1,31 +1,22 @@
 [package]
 name = "wisp-embers"
-version = "0.3.0"
-edition = "2024"
-rust-version = "1.95.0"
-license = "MIT"
-repository = "https://github.com/Pajn/wisp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Embers backend adapter for Wisp"
 
 [dependencies]
-embers-client = "0.1.0"
-embers-core = "0.1.0"
-embers-protocol = "0.1.0"
-thiserror = "2"
+embers-client = "0.3.0"
+embers-core = "0.3.0"
+embers-protocol = "0.3.0"
+thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
-embers-test-support = "0.1.0"
+embers-test-support = "0.3.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
-[lints.rust]
-unsafe_code = "forbid"
-unused_lifetimes = "warn"
-unused_macro_rules = "warn"
-unused_qualifications = "warn"
-
-[lints.clippy]
-dbg_macro = "deny"
-todo = "deny"
-unwrap_used = "deny"
-unnecessary_wraps = "warn"
+[lints]
+workspace = true

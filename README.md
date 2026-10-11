@@ -4,7 +4,7 @@ Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. I
 
 ## High-level features
 
-- tmux session discovery, switching, and attachment, with optional Embers backend support
+- tmux and Embers session discovery, switching, and attachment
 - sidebar pane and sidebar popup surfaces in addition to the main picker
 - git worktree-aware picker: see only sessions for the current repo, or browse all worktrees
 - [Kindra](https://github.com/Pajn/kindra) integration: spin up a fresh temporary worktree (branched off trunk) straight from the worktree picker
@@ -18,7 +18,7 @@ Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. I
 - `wisp-core`: canonical session, alert, reducer, and projection logic
 - `wisp-config`: config defaults, loading, merge precedence, and validation
 - `wisp-tmux`: tmux snapshot/actions backend plus polling fallback
-- `wisp-embers`: optional Embers snapshot/actions adapter and subscription bridge
+- `wisp-embers`: Embers snapshot/actions adapter and subscription bridge
 - `wisp-zoxide`: zoxide provider and normalization
 - `wisp-kindra`: Kindra (`kin`) temp-worktree detection and creation
 - `wisp-preview`: preview generation and cache
@@ -32,8 +32,7 @@ Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. I
 
 Requirements:
 
-- `tmux` for tmux-backed flows
-- an Embers checkout at `../embers` only when building with `--features embers`
+- `tmux` or [Embers](https://github.com/Pajn/Embers) as the multiplexer
 - `zoxide` for directory candidates
 - [Kindra](https://github.com/Pajn/kindra) (the `kin` binary) only for the temporary-worktree option in the worktree picker
 - Rust toolchain new enough for edition 2024
@@ -75,10 +74,9 @@ wisp sidebar-pane
 wisp statusline install
 ```
 
-For Embers, build with the opt-in feature and select the backend with config or an environment override:
+Embers support is built in on Unix targets. With the default `backend.kind = "auto"`, Wisp uses Embers when it finds an Embers socket and tmux otherwise. To select it explicitly, use config or an environment override:
 
 ```bash
-cargo install --path crates/wisp-bin --features embers
 WISP_BACKEND=embers wisp fullscreen
 WISP_BACKEND=embers WISP_EMBERS_SOCKET=/tmp/embers.sock wisp popup
 ```
@@ -141,12 +139,8 @@ Config file discovery:
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --workspace --all-targets --all-features -- -D warnings # requires ../embers
 cargo test --workspace --all-targets
-cargo test --workspace --all-targets --all-features # requires ../embers
-cargo clippy --manifest-path crates/wisp-embers/Cargo.toml --all-targets -- -D warnings # excluded from workspace; requires ../embers
-cargo test --manifest-path crates/wisp-embers/Cargo.toml --lib # excluded from workspace; requires ../embers
-cargo test --manifest-path crates/wisp-embers/Cargo.toml --test integration # requires ../embers
+cargo test -p wisp -p wisp-app --no-default-features --all-targets # without Embers support
 cargo test -p wisp --test smoke
 cargo bench -p wisp-core --bench projections --no-run
 cargo bench -p wisp-status --bench formatting --no-run
