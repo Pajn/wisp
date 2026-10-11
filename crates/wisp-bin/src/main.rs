@@ -1239,16 +1239,26 @@ fn surface_title(kind: SurfaceKind) -> &'static str {
     }
 }
 
+/// Environment for a wisp surface started in an Embers buffer. It names the
+/// client this wisp acts for, so the surface acts for the same client rather
+/// than resolving one again from its own pane.
 #[cfg(embers)]
-fn embers_sidebar_env(persistent: bool) -> BTreeMap<String, String> {
+fn embers_surface_env(
+    client: &EmbersClient,
+    persistent: bool,
+) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     let mut env = BTreeMap::new();
+    env.insert(
+        wisp_embers::CLIENT_ENV_VAR.to_string(),
+        client.target_client_id()?.to_string(),
+    );
     if persistent {
         env.insert(
             EMBERS_SURFACE_ENV.to_string(),
             EMBERS_SIDEBAR_PANE_SURFACE.to_string(),
         );
     }
-    env
+    Ok(env)
 }
 
 #[cfg(embers)]
@@ -1347,7 +1357,7 @@ fn open_popup_or_run_inline(
                 &command,
                 surface_title(kind),
                 Some(&cwd),
-                &BTreeMap::new(),
+                &embers_surface_env(client, false)?,
             )?;
             create_embers_floating_for_buffer(
                 client,
@@ -1407,7 +1417,7 @@ fn open_sidebar_popup_or_run_inline(
                 &command,
                 surface_title(SurfaceKind::SidebarCompact),
                 Some(&cwd),
-                &BTreeMap::new(),
+                &embers_surface_env(client, false)?,
             )?;
             create_embers_floating_for_buffer(
                 client,
@@ -1443,7 +1453,7 @@ fn open_sidebar_pane(backend: &RuntimeBackend) -> Result<(), Box<dyn Error>> {
                 &command,
                 SIDEBAR_PANE_TITLE,
                 Some(&cwd),
-                &embers_sidebar_env(true),
+                &embers_surface_env(client, true)?,
             )?;
             join_embers_buffer_to_current_session_root(
                 client,
