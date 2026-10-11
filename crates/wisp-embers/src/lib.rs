@@ -613,13 +613,19 @@ impl EmbersClient {
 }
 
 /// The current record of the client wisp acts for, resolving it first if this
-/// is the first time it is needed.
+/// is the first time it is needed, or again once that client has gone (a
+/// detach and reattach gives the user a new client id).
 fn target_client_record(
     runtime: &tokio::runtime::Runtime,
     state: &mut EmbersClientState,
 ) -> Result<ClientRecord, EmbersError> {
     if let Some(client_id) = state.target_client_id {
-        return get_client(runtime, state, client_id);
+        match get_client(runtime, state, client_id) {
+            Err(EmbersError::Mux(error)) if error.is_not_found() => {
+                state.target_client_id = None;
+            }
+            result => return result,
+        }
     }
     let clients = list_clients(runtime, state)?;
     target_client_among(runtime, state, &clients).ok_or(EmbersError::NoTargetClient)
@@ -633,10 +639,11 @@ fn target_client_among(
     clients: &[ClientRecord],
 ) -> Option<ClientRecord> {
     if let Some(client_id) = state.target_client_id {
-        return clients
-            .iter()
-            .find(|client| client.id == client_id)
-            .cloned();
+        if let Some(client) = clients.iter().find(|client| client.id == client_id) {
+            return Some(client.clone());
+        }
+        // That client has gone; resolve the target again.
+        state.target_client_id = None;
     }
     let target = resolve_target_client(runtime, state, clients);
     state.target_client_id = target.as_ref().map(|client| client.id);

@@ -521,6 +521,62 @@ fn single_attached_client_is_the_fallback_target() {
 }
 
 #[test]
+fn target_is_resolved_again_after_its_client_disconnects() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let server = runtime
+        .block_on(TestServer::start())
+        .expect("start embers server");
+    let mut setup = runtime
+        .block_on(TestConnection::connect(server.socket_path()))
+        .expect("connect setup client");
+    let (alpha_id, _) = runtime.block_on(create_session_with_buffer(&mut setup, "alpha"));
+    let (first, first_id) = runtime.block_on(attach_user_client(&server, alpha_id));
+
+    let client =
+        EmbersClient::connect_with_launch_env(server.socket_path(), EmbersLaunchEnv::default())
+            .expect("create embers client");
+    assert_eq!(client.target_client_id().expect("resolve target"), first_id);
+
+    // Detaching and attaching again gives the user a new client id.
+    drop(first);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while runtime
+        .block_on(list_clients(&mut setup))
+        .iter()
+        .any(|record| record.id == first_id)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first client never disconnected"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let (_second, second_id) = runtime.block_on(attach_user_client(&server, alpha_id));
+
+    assert_eq!(
+        client.current_session_name().expect("read current session"),
+        Some("alpha".to_string())
+    );
+    assert_eq!(
+        client.target_client_id().expect("resolve target"),
+        second_id
+    );
+    assert_eq!(
+        client
+            .snapshot()
+            .expect("snapshot")
+            .context
+            .current_session_name,
+        Some("alpha".to_string()),
+        "snapshot keeps the current session"
+    );
+
+    runtime
+        .block_on(server.shutdown())
+        .expect("shutdown embers server");
+}
+
+#[test]
 fn unresolvable_target_names_embers_client() {
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let server = runtime
