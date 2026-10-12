@@ -460,7 +460,8 @@ impl EmbersClient {
                     title: title.map(ToString::to_string),
                     focus,
                     close_on_empty,
-                    border: true,
+                    // The surface draws its own frame.
+                    border: false,
                 }),
             ))?;
             match response {
