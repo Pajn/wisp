@@ -9,7 +9,7 @@ use std::{
 use embers_core::{BufferId, SessionId, new_request_id};
 use embers_protocol::{
     BufferLocation, BufferLocationResponse, BufferRequest, ClientMessage, ClientRecord,
-    ClientRequest, ServerResponse, SessionRequest,
+    ClientRequest, NodeRecord, ServerResponse, SessionRequest, SessionSnapshot,
 };
 use embers_test_support::{TestConnection, TestServer};
 use wisp_embers::{EmbersClient, EmbersJoinPlacement, EmbersLaunchEnv};
@@ -170,6 +170,7 @@ async fn attach_user_client(server: &TestServer, session_id: SessionId) -> (Test
             request_id: new_request_id(),
             client_id: None,
             session_id,
+            node_id: None,
         }))
         .await
         .expect("switch user client")
@@ -326,12 +327,11 @@ fn joins_moves_and_detaches_sidebar_buffer_at_session_root() {
     let alpha_snapshot = runtime
         .block_on(connection.session_snapshot(alpha_id))
         .expect("alpha snapshot");
-    let alpha_root = alpha_snapshot
-        .nodes
-        .iter()
-        .find(|node| node.id == alpha_snapshot.session.root_node_id)
-        .expect("alpha root node");
-    let alpha_split = alpha_root.split.as_ref().expect("root should become split");
+    let alpha_root = window_root(&alpha_snapshot).expect("alpha window root");
+    let alpha_split = alpha_root
+        .split
+        .as_ref()
+        .expect("window root should become split");
     assert_eq!(alpha_split.sizes.first().copied(), Some(36));
     assert_eq!(alpha_split.child_ids.len(), 2);
 
@@ -374,15 +374,11 @@ fn joins_moves_and_detaches_sidebar_buffer_at_session_root() {
     let beta_snapshot = runtime
         .block_on(connection.session_snapshot(beta_id))
         .expect("beta snapshot");
-    let beta_root = beta_snapshot
-        .nodes
-        .iter()
-        .find(|node| node.id == beta_snapshot.session.root_node_id)
-        .expect("beta root node");
+    let beta_root = window_root(&beta_snapshot).expect("beta window root");
     let beta_split = beta_root
         .split
         .as_ref()
-        .expect("beta root should become split");
+        .expect("beta window root should become split");
     assert_eq!(beta_split.sizes.first().copied(), Some(36));
     assert_eq!(beta_split.child_ids.len(), 2);
 
@@ -725,4 +721,18 @@ fn session_preview_carries_the_panes_colors() {
     runtime
         .block_on(server.shutdown())
         .expect("shutdown embers server");
+}
+
+/// The root node of the window `snapshot`'s session shows: the active tab of
+/// its window list.
+fn window_root(snapshot: &SessionSnapshot) -> Option<&NodeRecord> {
+    let root = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == snapshot.session.root_node_id)?;
+    let window_id = match root.tabs.as_ref() {
+        Some(tabs) => tabs.tabs.get(tabs.active as usize)?.child_id,
+        None => root.id,
+    };
+    snapshot.nodes.iter().find(|node| node.id == window_id)
 }

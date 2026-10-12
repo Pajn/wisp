@@ -460,6 +460,7 @@ impl EmbersClient {
                     title: title.map(ToString::to_string),
                     focus,
                     close_on_empty,
+                    border: true,
                 }),
             ))?;
             match response {
@@ -482,13 +483,8 @@ impl EmbersClient {
         self.with_state(|runtime, state| {
             let (session_id, session_name) = current_session_info(runtime, state)?;
             runtime.block_on(state.client.resync_session(session_id))?;
-            let root_node_id = state
-                .client
-                .state()
-                .sessions
-                .get(&session_id)
-                .map(|session| session.root_node_id)
-                .ok_or_else(|| {
+            let root_node_id =
+                current_window_node(state.client.state(), session_id).ok_or_else(|| {
                     EmbersError::InvalidState(format!(
                         "session {session_id} is not cached for root join"
                     ))
@@ -748,6 +744,7 @@ fn switch_client_session(
             request_id: state.client.next_request_id(),
             client_id: Some(client_id_param(client_id)?),
             session_id,
+            node_id: None,
         },
     )))?;
     match response {
@@ -996,6 +993,22 @@ fn current_focused_buffer_id(state: &ClientState, session_id: SessionId) -> Opti
         .focused_leaf_id
         .and_then(|leaf_id| buffer_id_for_buffer_view(state, leaf_id))
         .or_else(|| preview_buffer_id(state, session_id))
+}
+
+/// The root of the window `session_id` shows: the active tab of the session's
+/// window list, or the session root itself when it has no window list. A
+/// buffer joined here spans the whole window, like tmux `split-window -f`.
+fn current_window_node(state: &ClientState, session_id: SessionId) -> Option<NodeId> {
+    let root_node_id = state.sessions.get(&session_id)?.root_node_id;
+    let root = state.nodes.get(&root_node_id)?;
+    if root.kind != NodeRecordKind::Tabs {
+        return Some(root_node_id);
+    }
+    let tabs = root.tabs.as_ref()?;
+    tabs.tabs
+        .get(tabs.active as usize)
+        .or_else(|| tabs.tabs.first())
+        .map(|tab| tab.child_id)
 }
 
 fn visible_size_for_session_root(state: &ClientState, session_id: SessionId) -> Option<PtySize> {
@@ -1440,6 +1453,7 @@ mod tests {
                 zoomed_node_id: None,
                 viewport: None,
                 base_index: None,
+                pane_titles: false,
             },
         );
         state.nodes.insert(
@@ -1456,6 +1470,7 @@ mod tests {
                     sizes: vec![36, 84],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         state.nodes.insert(
@@ -1530,6 +1545,7 @@ mod tests {
             }),
             split: None,
             tabs: None,
+            focus_leaf_id: None,
         }
     }
 
