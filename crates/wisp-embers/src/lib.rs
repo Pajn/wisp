@@ -232,20 +232,24 @@ impl EmbersClient {
             .collect())
     }
 
+    /// Processes pending server events and returns whether any of them
+    /// changes the sessions wisp lists. Output in a pane, including wisp's own
+    /// redraws, does not: reloading on it would rebuild the list many times a
+    /// second while wisp is open.
     pub fn poll_updates(&self) -> Result<bool, EmbersError> {
         self.with_state(|runtime, state| {
-            let mut saw_event = false;
+            let mut changed = false;
             while let Some(event) =
                 runtime.block_on(state.client.process_next_event_timeout(Duration::ZERO))?
             {
-                saw_event = true;
+                changed |= changes_session_list(&event);
                 if let ServerEvent::ClientChanged(event) = event
                     && Some(event.client.id) == state.target_client_id
                 {
                     state.previous_session_id = event.previous_session_id;
                 }
             }
-            Ok(saw_event)
+            Ok(changed)
         })
     }
 
@@ -731,6 +735,28 @@ fn get_client(
     match response {
         ServerResponse::Client(response) => Ok(response.client),
         _ => Err(EmbersError::UnexpectedResponse("client get")),
+    }
+}
+
+/// Whether `event` changes what wisp lists: the sessions, their windows and
+/// panes, and which session each client shows.
+fn changes_session_list(event: &ServerEvent) -> bool {
+    match event {
+        ServerEvent::SessionCreated(_)
+        | ServerEvent::SessionClosed(_)
+        | ServerEvent::SessionRenamed(_)
+        | ServerEvent::BufferCreated(_)
+        | ServerEvent::BufferDetached(_)
+        | ServerEvent::NodeChanged(_)
+        | ServerEvent::FloatingChanged(_)
+        | ServerEvent::FocusChanged(_)
+        | ServerEvent::ClientChanged(_) => true,
+        ServerEvent::RenderInvalidated(_)
+        | ServerEvent::BufferPipeChanged(_)
+        | ServerEvent::Clipboard(_)
+        | ServerEvent::DisplayMessage(_)
+        | ServerEvent::Passthrough(_)
+        | ServerEvent::ServerShutdown => false,
     }
 }
 
@@ -1430,14 +1456,33 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        EmbersJoinPlacement, centered_geometry, split_sizes_for_join, visible_size_for_node,
+        EmbersJoinPlacement, centered_geometry, changes_session_list, split_sizes_for_join,
+        visible_size_for_node,
     };
     use embers_client::ClientState;
     use embers_core::{ActivityState, BufferId, FloatGeometry, NodeId, PtySize, SessionId};
     use embers_protocol::{
         BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord, NodeRecord,
-        NodeRecordKind, SessionRecord, SplitRecord,
+        NodeRecordKind, RenderInvalidatedEvent, ServerEvent, SessionRecord, SessionRenamedEvent,
+        SplitRecord,
     };
+
+    #[test]
+    fn pane_output_does_not_change_the_session_list() {
+        // Every redraw of wisp's own popup is pane output: reloading on it
+        // rebuilt the list, and lost the selection, many times a second.
+        assert!(!changes_session_list(&ServerEvent::RenderInvalidated(
+            RenderInvalidatedEvent {
+                buffer_id: BufferId(1),
+            }
+        )));
+        assert!(changes_session_list(&ServerEvent::SessionRenamed(
+            SessionRenamedEvent {
+                session_id: SessionId(1),
+                name: "work".to_string(),
+            }
+        )));
+    }
 
     #[test]
     fn visible_size_for_split_sums_vertical_children() {
