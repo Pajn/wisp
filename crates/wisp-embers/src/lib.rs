@@ -276,13 +276,31 @@ impl EmbersClient {
         session_name: &str,
         directory: &Path,
     ) -> Result<(), EmbersError> {
+        self.create_or_switch_session_at(session_name, BufferPlace::Local(Some(directory)))
+    }
+
+    /// Switches to `session_name`, creating it first with a window whose shell
+    /// runs on `host`'s embers server.
+    pub fn create_or_switch_remote_session(
+        &self,
+        session_name: &str,
+        host: &str,
+    ) -> Result<(), EmbersError> {
+        self.create_or_switch_session_at(session_name, BufferPlace::Host(host))
+    }
+
+    fn create_or_switch_session_at(
+        &self,
+        session_name: &str,
+        place: BufferPlace<'_>,
+    ) -> Result<(), EmbersError> {
         self.with_state(|runtime, state| {
             runtime.block_on(state.client.resync_all_sessions())?;
             let target_client = target_client_record(runtime, state)?;
             if let Ok(existing_id) = resolve_session_by_name(state.client.state(), session_name)
                 .map(|session| session.id)
             {
-                ensure_root_window(runtime, state, existing_id, directory)?;
+                ensure_root_window(runtime, state, existing_id, place)?;
                 if target_client.current_session_id != Some(existing_id) {
                     // Skip the no-op switch so previous_session_id is not
                     // clobbered when the target is already the current session.
@@ -293,7 +311,18 @@ impl EmbersClient {
             }
 
             let session_id = create_session(runtime, state, session_name)?;
-            ensure_root_window(runtime, state, session_id, directory)?;
+            if let Err(error) = ensure_root_window(runtime, state, session_id, place) {
+                // Leave no empty session behind, as for a host that cannot be
+                // reached. Its window is what failed, so that is the error.
+                let _ = runtime.block_on(state.client.request_message(ClientMessage::Session(
+                    SessionRequest::Close {
+                        request_id: state.client.next_request_id(),
+                        session_id,
+                        force: true,
+                    },
+                )));
+                return Err(error);
+            }
             state.previous_session_id = target_client.current_session_id;
             switch_client_session(runtime, state, target_client.id, session_id)?;
             // The next snapshot()/poll_updates refreshes session state, so no
@@ -433,7 +462,15 @@ impl EmbersClient {
         env: &BTreeMap<String, String>,
     ) -> Result<String, EmbersError> {
         self.with_state(|runtime, state| {
-            let buffer_id = create_buffer_record(runtime, state, None, command, title, cwd, env)?;
+            let buffer_id = create_buffer_record(
+                runtime,
+                state,
+                None,
+                command,
+                title,
+                BufferPlace::Local(cwd),
+                env,
+            )?;
             Ok(buffer_id.0.to_string())
         })
     }
@@ -903,17 +940,28 @@ fn create_session(
     }
 }
 
+/// Where a buffer runs its program.
+#[derive(Clone, Copy)]
+enum BufferPlace<'a> {
+    /// On this machine, in the directory given or the server's default.
+    Local(Option<&'a Path>),
+    /// On another host's embers server, in the directory that server chooses.
+    Host(&'a str),
+}
+
 fn ensure_root_window(
     runtime: &tokio::runtime::Runtime,
     state: &mut EmbersClientState,
     session_id: SessionId,
-    directory: &Path,
+    place: BufferPlace<'_>,
 ) -> Result<(), EmbersError> {
     runtime.block_on(state.client.resync_session(session_id))?;
     if session_has_root_window(state.client.state(), session_id)? {
         return Ok(());
     }
 
+    // A remote shell is this machine's $SHELL too, as `embers new-session
+    // --host` starts it.
     let command = default_shell_command();
     let title = default_title(&command, "shell");
     let buffer_id = create_buffer_record(
@@ -922,7 +970,7 @@ fn ensure_root_window(
         Some(session_id),
         &command,
         &title,
-        Some(directory),
+        place,
         &BTreeMap::new(),
     )?;
     let response = runtime.block_on(state.client.request_message(ClientMessage::Session(
@@ -952,9 +1000,13 @@ fn create_buffer_record(
     session_id: Option<SessionId>,
     command: &[String],
     title: &str,
-    cwd: Option<&Path>,
+    place: BufferPlace<'_>,
     env: &BTreeMap<String, String>,
 ) -> Result<BufferId, EmbersError> {
+    let (cwd, host) = match place {
+        BufferPlace::Local(cwd) => (cwd, None),
+        BufferPlace::Host(host) => (None, Some(host)),
+    };
     let response = runtime.block_on(state.client.request_message(ClientMessage::Buffer(
         BufferRequest::Create {
             request_id: state.client.next_request_id(),
@@ -964,7 +1016,7 @@ fn create_buffer_record(
             env: env.clone(),
             size: None,
             session_id,
-            host: None,
+            host: host.map(ToString::to_string),
         },
     )))?;
     match response {

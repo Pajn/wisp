@@ -2309,6 +2309,7 @@ dependencies = [
  "wisp-fuzzy",
  "wisp-kindra",
  "wisp-preview",
+ "wisp-ssh",
  "wisp-status",
  "wisp-tmux",
  "wisp-ui",
@@ -2377,6 +2378,10 @@ dependencies = [
  "wisp-core",
  "wisp-tmux",
 ]
+
+[[package]]
+name = "wisp-ssh"
+version = "0.4.2"
 
 [[package]]
 name = "wisp-status"

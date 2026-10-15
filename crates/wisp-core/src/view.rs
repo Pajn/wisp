@@ -82,6 +82,7 @@ pub enum SessionListItemKind {
     WorktreeSession,    // session running in a worktree
     Worktree,           // worktree with no session
     Zoxide,             // zoxide directory match
+    SshHost,            // ssh config host: action: create a session on that host
     CreateTempWorktree, // action: create a new Kindra temporary worktree
 }
 

@@ -62,8 +62,14 @@ pub fn sanitize_session_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("wisp");
+    sanitize_session_label(raw_name)
+}
 
-    let sanitized: String = raw_name
+/// A session name from `label`, keeping ASCII letters, digits, `-` and `_` and
+/// turning anything else into `-`.
+#[must_use]
+pub fn sanitize_session_label(label: &str) -> String {
+    let sanitized: String = label
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {

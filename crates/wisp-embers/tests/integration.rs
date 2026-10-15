@@ -737,3 +737,50 @@ fn window_root(snapshot: &SessionSnapshot) -> Option<&NodeRecord> {
     };
     snapshot.nodes.iter().find(|node| node.id == window_id)
 }
+
+#[test]
+fn an_unreachable_host_leaves_no_session_behind() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    // A remote command that fails the way SSH does for a host it cannot reach.
+    let server = runtime
+        .block_on(TestServer::start_with(|config| {
+            config.remote_command = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo \"$0: no route to host\" >&2; exit 255".to_string(),
+                "{host}".to_string(),
+            ];
+        }))
+        .expect("start embers server");
+    let mut setup = runtime
+        .block_on(TestConnection::connect(server.socket_path()))
+        .expect("connect setup client");
+    let (alpha_id, _) = runtime.block_on(create_session_with_buffer(&mut setup, "alpha"));
+    let (_user, user_id) = runtime.block_on(attach_user_client(&server, alpha_id));
+
+    let client =
+        EmbersClient::connect_with_launch_env(server.socket_path(), launched_by_client(user_id))
+            .expect("create embers client");
+
+    let error = client
+        .create_or_switch_remote_session("devbox", "devbox")
+        .expect_err("an unreachable host fails");
+    assert!(
+        error.to_string().contains("devbox: no route to host"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        client.list_session_names().expect("list sessions"),
+        vec!["alpha".to_string()]
+    );
+    assert_eq!(
+        runtime
+            .block_on(client_record(&mut setup, user_id))
+            .current_session_id,
+        Some(alpha_id)
+    );
+
+    runtime
+        .block_on(server.shutdown())
+        .expect("shutdown embers server");
+}

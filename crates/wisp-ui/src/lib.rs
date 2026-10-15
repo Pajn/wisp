@@ -353,6 +353,8 @@ fn render_list(area: Rect, buffer: &mut Buffer, model: &SurfaceModel, compact: b
                 "+"
             } else if matches!(item.kind, SessionListItemKind::Zoxide) {
                 "Z"
+            } else if matches!(item.kind, SessionListItemKind::SshHost) {
+                "S"
             } else if matches!(item.kind, SessionListItemKind::Worktree) {
                 "W"
             } else if item.is_current {

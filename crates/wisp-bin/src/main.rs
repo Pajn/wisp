@@ -29,8 +29,8 @@ use wisp_config::{
 use wisp_core::{
     DomainState, GitBranchStatus, GitBranchSync, PickerMode, PreviewContent, PreviewKey,
     PreviewRequest, SessionListItem, SessionListSortMode, derive_session_list,
-    derive_session_list_with_worktrees, derive_status_items, sanitize_session_name,
-    sort_session_list_items,
+    derive_session_list_with_worktrees, derive_status_items, sanitize_session_label,
+    sanitize_session_name, sort_session_list_items,
 };
 #[cfg(embers)]
 use wisp_embers::{EmbersClient, EmbersJoinPlacement};
@@ -40,6 +40,7 @@ use wisp_preview::{
     ActivePanePreviewProvider, FilesystemPreviewProvider, PreviewProvider,
     SessionDetailsPreviewProvider,
 };
+use wisp_ssh::SshHost;
 use wisp_status::{StatusFormatOptions, StatusRenderMode, render_status_line};
 use wisp_tmux::{
     CommandTmuxClient, PollingTmuxBackend, PopupCommand, PopupOptions, PopupSpec, SidebarPaneSpec,
@@ -55,6 +56,7 @@ const DEFAULT_CLIENT_ID: &str = "default";
 const SIDEBAR_PANE_TITLE: &str = "Wisp Sidebar";
 const SIDEBAR_PANE_WIDTH: u16 = 36;
 const ZOXIDE_PICKER_MAX_RESULTS: usize = 5;
+const SSH_PICKER_MAX_RESULTS: usize = 5;
 #[cfg(embers)]
 const EMBERS_SURFACE_ENV: &str = "WISP_EMBERS_SURFACE";
 #[cfg(embers)]
@@ -906,6 +908,8 @@ fn selected_index_for_session(
 /// not overlap and existing tmux call sites keep passing `&tmux` unchanged.
 trait SessionLauncher {
     fn create_or_switch(&self, name: &str, directory: &Path) -> Result<(), Box<dyn Error>>;
+    /// Like `create_or_switch`, with the new session's shell on `host`.
+    fn create_or_switch_on_host(&self, name: &str, host: &str) -> Result<(), Box<dyn Error>>;
     fn existing_session_names(&self) -> Result<Vec<String>, Box<dyn Error>>;
     fn switch_to(&self, session_id: &str) -> Result<(), Box<dyn Error>>;
 }
@@ -914,6 +918,10 @@ impl<T: TmuxClient> SessionLauncher for &T {
     fn create_or_switch(&self, name: &str, directory: &Path) -> Result<(), Box<dyn Error>> {
         self.create_or_switch_session(name, directory)?;
         Ok(())
+    }
+
+    fn create_or_switch_on_host(&self, _name: &str, _host: &str) -> Result<(), Box<dyn Error>> {
+        Err("sessions on other hosts need the embers backend".into())
     }
 
     fn existing_session_names(&self) -> Result<Vec<String>, Box<dyn Error>> {
@@ -937,6 +945,11 @@ impl<T: TmuxClient> SessionLauncher for &T {
 impl SessionLauncher for Arc<EmbersClient> {
     fn create_or_switch(&self, name: &str, directory: &Path) -> Result<(), Box<dyn Error>> {
         self.create_or_switch_session(name, directory)?;
+        Ok(())
+    }
+
+    fn create_or_switch_on_host(&self, name: &str, host: &str) -> Result<(), Box<dyn Error>> {
+        self.create_or_switch_remote_session(name, host)?;
         Ok(())
     }
 
@@ -1184,6 +1197,12 @@ fn activate_filter_selection(
                     }
                 }
                 return Ok(false);
+            }
+            wisp_core::SessionListItemKind::SshHost => {
+                // The label is the host's alias in the SSH config.
+                let host = &item.label;
+                launcher.create_or_switch_on_host(&sanitize_session_label(host), host)?;
+                return Ok(true);
             }
             wisp_core::SessionListItemKind::CreateTempWorktree => {
                 // `worktree_path` carries the repo root to run `kin` in and
@@ -1484,6 +1503,7 @@ fn run_surface(
     backend: &RuntimeBackend,
 ) -> Result<(), Box<dyn Error>> {
     let zoxide_entries = load_zoxide_entries();
+    let ssh_hosts = load_ssh_hosts(backend);
     let loaded_state = load_domain_state_with_zoxide(backend, zoxide_entries.clone())?;
     let mut active_client_id = loaded_state.client_id;
     let state = loaded_state.state;
@@ -1681,6 +1701,11 @@ fn run_surface(
                 &zoxide_entries,
                 &query,
                 ZOXIDE_PICKER_MAX_RESULTS,
+            ));
+            filtered.extend(ssh_items_for_query(
+                &ssh_hosts,
+                &query,
+                SSH_PICKER_MAX_RESULTS,
             ));
         }
         if matches!(input_mode, InputMode::Filter) && picker_mode == PickerMode::Worktree {
@@ -2401,6 +2426,13 @@ fn generate_preview(provider: &dyn PreviewProvider, item: &SessionListItem) -> V
             }
             lines
         }
+        wisp_core::SessionListItemKind::SshHost => {
+            let mut lines = vec![format!("Create a session on '{}'", item.label)];
+            if let Some(hint) = &item.path_hint {
+                lines.push(hint.clone());
+            }
+            lines
+        }
         wisp_core::SessionListItemKind::Zoxide => {
             // For zoxide matches, show directory preview using worktree_path
             if let Some(path) = &item.worktree_path {
@@ -2729,6 +2761,16 @@ fn load_zoxide_entries() -> Vec<wisp_zoxide::DirectoryEntry> {
     CommandZoxideProvider::new()
         .load_entries(500)
         .unwrap_or_default()
+}
+
+/// The hosts in the user's SSH config. Only embers can run a session on
+/// another host, so the tmux backend offers none.
+fn load_ssh_hosts(backend: &RuntimeBackend) -> Vec<SshHost> {
+    match backend {
+        RuntimeBackend::Tmux => Vec::new(),
+        #[cfg(embers)]
+        RuntimeBackend::Embers(_) => wisp_ssh::load_user_hosts(),
+    }
 }
 
 struct LoadedDomainState {
@@ -3077,6 +3119,38 @@ fn zoxide_items_for_query(
         .collect()
 }
 
+fn ssh_items_for_query(hosts: &[SshHost], query: &str, max_results: usize) -> Vec<SessionListItem> {
+    if query.trim().is_empty() || max_results == 0 {
+        return Vec::new();
+    }
+
+    let items = hosts
+        .iter()
+        .map(|host| SessionListItem {
+            session_id: format!("ssh:{}", host.alias),
+            label: host.alias.clone(),
+            kind: wisp_core::SessionListItemKind::SshHost,
+            is_current: false,
+            is_previous: false,
+            last_activity: None,
+            attached: false,
+            attention: wisp_core::AttentionBadge::None,
+            attention_count: 0,
+            active_window_label: None,
+            path_hint: Some(host.destination()),
+            command_hint: None,
+            git_branch: None,
+            worktree_path: None,
+            worktree_branch: None,
+        })
+        .collect::<Vec<_>>();
+
+    filter_items(&items, query)
+        .into_iter()
+        .take(max_results)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3113,13 +3187,13 @@ mod tests {
 
     use crate::{
         SIDEBAR_PANE_TITLE, SIDEBAR_PANE_WIDTH, STATUSLINE_REFRESH_COMMAND,
-        STATUSLINE_REFRESH_HOOKS, SidebarRuntime, SidebarTarget, StatuslineGroupCommand,
-        StatuslineRenderCommand, StatuslineSubcommand, SurfaceKind, activate_filter_selection,
-        apply_session_sort, clear_sidebar_ui_state, create_session_from_query, current_session_id,
-        disable_sidebar_for_session, filter_items, install_statusline_refresh_hooks,
-        load_sidebar_ui_state, persist_sidebar_ui_state, picker_bindings,
-        reconcile_sidebar_for_current_context, selected_index_for_session,
-        sidebar_requires_handoff, sidebar_state_path, sidebar_surface_command,
+        STATUSLINE_REFRESH_HOOKS, SessionLauncher, SidebarRuntime, SidebarTarget,
+        StatuslineGroupCommand, StatuslineRenderCommand, StatuslineSubcommand, SurfaceKind,
+        activate_filter_selection, apply_session_sort, clear_sidebar_ui_state,
+        create_session_from_query, current_session_id, disable_sidebar_for_session, filter_items,
+        install_statusline_refresh_hooks, load_sidebar_ui_state, persist_sidebar_ui_state,
+        picker_bindings, reconcile_sidebar_for_current_context, selected_index_for_session,
+        sidebar_requires_handoff, sidebar_state_path, sidebar_surface_command, ssh_items_for_query,
         statusline_command_expression, statusline_mode, uninstall_statusline_refresh_hooks,
         validate_statusline_flags, zoxide_items_for_query,
     };
@@ -4397,6 +4471,117 @@ mod tests {
         }];
 
         assert!(zoxide_items_for_query(&entries, "  ", 5).is_empty());
+    }
+
+    fn ssh_host(alias: &str, hostname: Option<&str>) -> wisp_ssh::SshHost {
+        wisp_ssh::SshHost {
+            alias: alias.to_string(),
+            hostname: hostname.map(str::to_string),
+            ..wisp_ssh::SshHost::default()
+        }
+    }
+
+    #[test]
+    fn ssh_picker_results_match_aliases_and_hostnames_and_are_capped() {
+        let mut hosts = (0..7)
+            .map(|index| ssh_host(&format!("build-{index}"), None))
+            .collect::<Vec<_>>();
+        hosts.push(ssh_host("devbox", Some("dev.example.com")));
+
+        let results = ssh_items_for_query(&hosts, "build", 5);
+        assert_eq!(results.len(), 5);
+        assert!(results.iter().all(|item| {
+            item.kind == wisp_core::SessionListItemKind::SshHost && item.label.contains("build")
+        }));
+
+        let results = ssh_items_for_query(&hosts, "example", 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].label, "devbox");
+        assert_eq!(results[0].path_hint.as_deref(), Some("dev.example.com"));
+    }
+
+    #[test]
+    fn ssh_picker_results_are_hidden_without_a_query() {
+        assert!(ssh_items_for_query(&[ssh_host("devbox", None)], "  ", 5).is_empty());
+    }
+
+    /// Records the sessions created on other hosts.
+    #[derive(Default)]
+    struct RemoteLauncher {
+        remote_sessions: RefCell<Vec<(String, String)>>,
+    }
+
+    impl SessionLauncher for &RemoteLauncher {
+        fn create_or_switch(
+            &self,
+            _name: &str,
+            _directory: &Path,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            panic!("an SSH host row creates no local session")
+        }
+
+        fn create_or_switch_on_host(
+            &self,
+            name: &str,
+            host: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.remote_sessions
+                .borrow_mut()
+                .push((name.to_string(), host.to_string()));
+            Ok(())
+        }
+
+        fn existing_session_names(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            Ok(Vec::new())
+        }
+
+        fn switch_to(&self, _session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+            panic!("an SSH host row switches to no existing session")
+        }
+    }
+
+    #[test]
+    fn activate_filter_selection_creates_session_on_ssh_host() {
+        let launcher = RemoteLauncher::default();
+        let filtered = ssh_items_for_query(&[ssh_host("web.prod", None)], "web", 5);
+
+        assert!(
+            activate_filter_selection(
+                &launcher,
+                &StubZoxideProvider::default(),
+                &StubKindraProvider::default(),
+                &filtered,
+                0,
+                "web",
+                Path::new("/fallback"),
+                false,
+            )
+            .expect("SSH host selection should create or switch")
+        );
+        assert_eq!(
+            launcher.remote_sessions.borrow().as_slice(),
+            [("web-prod".to_string(), "web.prod".to_string())]
+        );
+    }
+
+    #[test]
+    fn tmux_cannot_create_a_session_on_an_ssh_host() {
+        let tmux = StubTmuxClient::default();
+        let filtered = ssh_items_for_query(&[ssh_host("devbox", None)], "devbox", 5);
+
+        let result = activate_filter_selection(
+            &tmux,
+            &StubZoxideProvider::default(),
+            &StubKindraProvider::default(),
+            &filtered,
+            0,
+            "devbox",
+            Path::new("/fallback"),
+            false,
+        );
+
+        assert!(result.is_err());
+        assert!(tmux.created_sessions.borrow().is_empty());
     }
 
     #[test]

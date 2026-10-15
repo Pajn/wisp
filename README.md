@@ -9,6 +9,7 @@ Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. I
 - git worktree-aware picker: see only sessions for the current repo, or browse all worktrees
 - [Kindra](https://github.com/Pajn/kindra) integration: spin up a fresh temporary worktree (branched off trunk) straight from the worktree picker
 - zoxide-backed directory discovery
+- SSH config hosts as candidates for Embers sessions on other machines
 - fuzzy filtering and session previews
 - configurable behavior through TOML config plus environment overrides
 - strong validation with workspace-wide `fmt`, `clippy`, tests, smoke tests, and benchmark targets
@@ -20,6 +21,7 @@ Wisp is a native Rust multiplexer navigation tool inspired by `tmux-sessionx`. I
 - `wisp-tmux`: tmux snapshot/actions backend plus polling fallback
 - `wisp-embers`: Embers snapshot/actions adapter and subscription bridge
 - `wisp-zoxide`: zoxide provider and normalization
+- `wisp-ssh`: host discovery from the user's SSH config
 - `wisp-kindra`: Kindra (`kin`) temp-worktree detection and creation
 - `wisp-preview`: preview generation and cache
 - `wisp-fuzzy`: matcher abstraction
@@ -96,6 +98,8 @@ Wisp acts for one Embers client: popups open in that client's session, and picki
 3. The only client attached to a session, if there is exactly one.
 
 Older Embers versions don't set `EMBERS_CLIENT`, so bindings there rely on the fallbacks. If none of them finds a client, Wisp exits with an error naming `EMBERS_CLIENT`, and Embers shows it in the status line. You can set it yourself to an id from `embers list-clients`.
+
+Under Embers, typing in the picker also offers the hosts named in `~/.ssh/config` and the files it includes, marked `S`, after the zoxide directories. Picking one switches to a session named after the host, first creating it with a shell that runs on that host's Embers server. The host needs what Embers' [remote buffers](https://github.com/Pajn/Embers/blob/main/docs/commands.md#remote-buffers) need. `Host` patterns such as `*` name no single host and are not offered.
 
 Use `--worktree` (or `-w`) to start the picker in worktree mode, which shows only sessions belonging to worktrees of the current repo alongside worktrees that don't yet have sessions.
 

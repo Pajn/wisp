@@ -5,7 +5,10 @@ mod preview;
 mod reduce;
 mod view;
 
-pub use action::{Action, CandidateAction, ResolvedAction, resolve_action, sanitize_session_name};
+pub use action::{
+    Action, CandidateAction, ResolvedAction, resolve_action, sanitize_session_label,
+    sanitize_session_name,
+};
 pub use candidate::{
     Candidate, CandidateId, CandidateKind, CandidateMetadata, DirectoryMetadata, ScoreHints,
     SessionMetadata, WindowMetadata, WorktreeMetadata, deduplicate_candidates,

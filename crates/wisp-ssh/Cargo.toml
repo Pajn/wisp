@@ -1,0 +1,13 @@
+[package]
+name = "wisp-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SSH config host discovery for Wisp"
+
+[dependencies]
+
+[lints]
+workspace = true
