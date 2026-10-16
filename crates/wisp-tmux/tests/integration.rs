@@ -1,5 +1,6 @@
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
@@ -54,7 +55,9 @@ impl TmuxHarness {
     }
 
     fn run<const N: usize>(&self, args: [&str; N]) -> std::process::Output {
+        // -u, as wisp passes it, so tabs in formats survive any locale.
         Command::new("tmux")
+            .arg("-u")
             .arg("-L")
             .arg(&self.socket_name)
             .arg("-f")
@@ -102,6 +105,28 @@ fn lists_sessions_from_an_isolated_server() {
     assert!(names.contains(&"alpha"));
     assert!(names.contains(&"beta"));
     assert!(sessions.iter().all(|session| session.id.starts_with('$')));
+}
+
+#[test]
+fn lists_sessions_for_a_client_without_a_utf8_locale() {
+    let harness = TmuxHarness::new();
+    harness.seed_session("café");
+    // wisp's tmux, run as if from an environment with no UTF-8 locale.
+    let tmux = harness.root.join("tmux-c-locale");
+    fs::write(&tmux, "#!/bin/sh\nLC_ALL=C LANG=C exec tmux \"$@\"\n").expect("write wrapper");
+    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).expect("make wrapper runnable");
+
+    let sessions = harness
+        .client()
+        .with_binary(&tmux)
+        .list_sessions()
+        .expect("list tmux sessions");
+
+    let names = sessions
+        .iter()
+        .map(|session| session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["café"]);
 }
 
 #[test]
