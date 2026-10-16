@@ -579,9 +579,9 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embers-client"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "854673b5a2cf80ded5271ec27a7352a7536fc06c29942a866a2586869b357fc9"
+checksum = "71cbebc1320801a7b4a476c4f2ecedfce9cb497f2033eb221ed0e1566a7193d9"
 dependencies = [
  "async-trait",
  "base64",
@@ -601,22 +601,24 @@ dependencies = [
 
 [[package]]
 name = "embers-core"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96fa2fcddd38731af08182958c97e98eec78199e79a8317bcab29c6cd6f903c"
+checksum = "0d47337a539bfb81de25f271943a9f1b9229671a5776a6febd80acc4e2a1adae"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
 name = "embers-protocol"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d88dd1f97e6c60e50c12f86488ff031ae0de66c39fce7cf746ff5acc8971110"
+checksum = "f9fd2ab9dff22f88a480113d870136fc0e0abd27a7bd98c25808ac94d564ce90"
 dependencies = [
  "embers-core",
  "flatbuffers",
@@ -626,9 +628,9 @@ dependencies = [
 
 [[package]]
 name = "embers-server"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7da03de41aa7983ecfdd988c77ccd870a6d440e1b7c795e854730e6087a31c95"
+checksum = "d2bfb6d15f01c7dcceb3550ba295c14c1a6566b1a929ffcb108599cd01098974"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -644,9 +646,9 @@ dependencies = [
 
 [[package]]
 name = "embers-test-support"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7223c282b00d937005301bbbfd1f3751a1397e70d01cabfd7727573394cce94c"
+checksum = "b7d118e91b1195d15a66e60694d76b33dd4b55d1ee7af33714d51b5bc74e7c79"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -2307,6 +2309,7 @@ dependencies = [
  "wisp-fuzzy",
  "wisp-kindra",
  "wisp-preview",
+ "wisp-ssh",
  "wisp-status",
  "wisp-tmux",
  "wisp-ui",
@@ -2375,6 +2378,10 @@ dependencies = [
  "wisp-core",
  "wisp-tmux",
 ]
+
+[[package]]
+name = "wisp-ssh"
+version = "0.4.2"
 
 [[package]]
 name = "wisp-status"

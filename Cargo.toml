@@ -8,6 +8,7 @@ members = [
     "crates/wisp-fuzzy",
     "crates/wisp-kindra",
     "crates/wisp-preview",
+    "crates/wisp-ssh",
     "crates/wisp-status",
     "crates/wisp-tmux",
     "crates/wisp-ui",
@@ -49,6 +50,7 @@ wisp-embers = { version = "0.4.2", path = "crates/wisp-embers" }
 wisp-fuzzy = { version = "0.4.2", path = "crates/wisp-fuzzy" }
 wisp-kindra = { version = "0.4.2", path = "crates/wisp-kindra" }
 wisp-preview = { version = "0.4.2", path = "crates/wisp-preview" }
+wisp-ssh = { version = "0.4.2", path = "crates/wisp-ssh" }
 wisp-status = { version = "0.4.2", path = "crates/wisp-status" }
 wisp-tmux = { version = "0.4.2", path = "crates/wisp-tmux" }
 wisp-ui = { version = "0.4.2", path = "crates/wisp-ui" }

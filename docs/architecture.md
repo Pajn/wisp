@@ -29,6 +29,7 @@ This layer stays free of tmux I/O, terminal rendering, and subprocess management
 
 - `wisp-tmux` loads snapshots, issues switch/attach commands, opens popups or panes, and updates tmux status lines.
 - `wisp-zoxide` loads and normalizes directory candidates.
+- `wisp-ssh` reads the hosts named in the user's SSH config, for Embers sessions on other machines.
 - `wisp-preview` generates session and filesystem previews with a bounded cache.
 
 These crates translate external systems into domain-friendly data and commands.
