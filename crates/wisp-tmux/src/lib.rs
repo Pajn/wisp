@@ -346,6 +346,10 @@ impl CommandTmuxClient {
     fn run_tmux(&self, args: Vec<String>) -> Result<String, TmuxError> {
         let command_line = self.command_line(&args);
         let mut command = Command::new(&self.binary);
+        // Without -u, tmux prints `_` for every tab in a format, and for every
+        // non-ASCII character in a name, to a client it does not take for
+        // UTF-8, such as one started without a UTF-8 locale.
+        command.arg("-u");
         if let Some(socket_name) = &self.socket_name {
             command.arg("-L").arg(socket_name);
         }
@@ -380,7 +384,7 @@ impl CommandTmuxClient {
     }
 
     fn command_line(&self, args: &[String]) -> Vec<String> {
-        let mut command = vec![self.binary.display().to_string()];
+        let mut command = vec![self.binary.display().to_string(), "-u".to_string()];
         if let Some(socket_name) = &self.socket_name {
             command.push("-L".to_string());
             command.push(socket_name.clone());
