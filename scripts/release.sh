@@ -8,6 +8,7 @@ readonly CARGO_TOML="${ROOT_DIR}/Cargo.toml"
 # crate appears after the wisp-* crates it depends on, so each `cargo publish`
 # resolves its dependencies against versions already live on crates.io.
 readonly PUBLISH_PACKAGES=(
+  wisp-ssh
   wisp-core
   wisp-config
   wisp-fuzzy
@@ -70,6 +71,18 @@ PY
 
 validate_version() {
   [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must match X.Y.Z"
+}
+
+# Fail unless PUBLISH_PACKAGES lists every workspace crate exactly once, so a
+# new crate cannot be left out of the release: crates published before the
+# gap would stay on crates.io while those after it fail to resolve.
+require_complete_publish_list() {
+  local members listed
+  members="$(cd "${ROOT_DIR}" && cargo metadata --no-deps --format-version 1 \
+    | python3 -c 'import json, sys; print("\n".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"])))')"
+  listed="$(printf '%s\n' "${PUBLISH_PACKAGES[@]}" | sort)"
+  [[ "${members}" == "${listed}" ]] || die "PUBLISH_PACKAGES must list each workspace crate once; differences (< workspace, > list):
+$(diff <(echo "${members}") <(echo "${listed}") | grep '^[<>]')"
 }
 
 require_clean_tree() {
@@ -273,6 +286,7 @@ cmd_prepare() {
   local existing_version
   validate_version "${version}"
   require_clean_tree
+  require_complete_publish_list
 
   existing_version="$(current_version)"
   [[ "${version}" != "${existing_version}" ]] || die "version ${version} is already current"
@@ -317,6 +331,7 @@ cmd_publish() {
   tag="$(resolve_tag "${tag}")"
   cmd_verify_tag "${tag}"
   require_clean_tree
+  require_complete_publish_list
   run_validation
   preflight_packages "$(tag_to_version "${tag}")"
   if [[ "${dry_run}" == "false" ]]; then
