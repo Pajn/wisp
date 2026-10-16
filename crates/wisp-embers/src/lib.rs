@@ -964,6 +964,7 @@ fn create_buffer_record(
             env: env.clone(),
             size: None,
             session_id,
+            host: None,
         },
     )))?;
     match response {
@@ -1616,6 +1617,8 @@ mod tests {
             user_options: BTreeMap::new(),
             foreground_command: None,
             env: BTreeMap::new(),
+            bell_sequence: 0,
+            host: None,
         }
     }
 }

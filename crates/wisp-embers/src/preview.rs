@@ -181,6 +181,7 @@ mod tests {
             text: text.to_string(),
             runs,
             links: Vec::new(),
+            cell_spans: Vec::new(),
         }
     }
 

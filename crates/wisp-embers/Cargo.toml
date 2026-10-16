@@ -8,14 +8,14 @@ repository.workspace = true
 description = "Embers backend adapter for Wisp"
 
 [dependencies]
-embers-client = "0.3.2"
-embers-core = "0.3.2"
-embers-protocol = "0.3.2"
+embers-client = "0.4.0"
+embers-core = "0.4.0"
+embers-protocol = "0.4.0"
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
-embers-test-support = "0.3.2"
+embers-test-support = "0.4.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

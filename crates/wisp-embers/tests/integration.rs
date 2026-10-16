@@ -134,6 +134,7 @@ async fn create_session_running(
             env: BTreeMap::new(),
             size: None,
             session_id: Some(session_id),
+            host: None,
         }))
         .await
         .expect("create buffer succeeds")
